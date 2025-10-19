@@ -1,0 +1,32 @@
+{
+  "name": "kipphi-player",
+  "description": "",
+  "version": "2.0.0",
+  "author": "Team Zincs (https://github.com/TeamZincs)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TeamZincs/kipphi-player.git"
+  },
+  "files": [
+    "index.ts",
+    "audio.ts",
+    "image.ts",
+    "matrix.ts",
+    "player.ts",
+    "util.ts",
+    "LICENSE"
+  ],
+  "module": "index.ts",
+  "main": "index.ts",
+  "type": "module",
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "kipphi": "^2.0.1"
+  }
+}
