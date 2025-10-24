@@ -32,6 +32,7 @@ declare module "kipphi" {
         alpha: number;
         transformedX: number;
         transformedY: number;
+        optimized: boolean;
     }
 }
 
@@ -72,7 +73,8 @@ export class Player {
     noteSize: number;
     noteHeight: number;
     // soundQueue: SoundEntity[];
-    lastBeats: number
+    lastBeats: number;
+    lastRenderingBeats: number
 
     tintNotesMapping: Map<HEX, OffscreenCanvas | ImageBitmap> = new Map();
     tintEffectMapping: Map<HEX, OffscreenCanvas | ImageBitmap> = new Map();
@@ -87,6 +89,12 @@ export class Player {
     showsInfo = true;
     showsLineID = false;
     showsRenderingBaseline = false;
+    /** In Seconds */
+    baseOffset = -0.017;
+    /**
+     * 为渲染部分采用不同的偏移值（比如蓝牙耳机延迟高，容易音画不同步）
+     */
+    renderingOffset = 0;
 
     
     textureMapping: Map<string, ImageBitmap> = new Map();
@@ -110,10 +118,13 @@ export class Player {
         this.initGreyScreen();
     }
     get time(): number {
-        return (this.audio.currentTime || 0) - this.chart.offset / 1000 - 0.017;
+        return (this.audio.currentTime || 0) - this.chart.offset / 1000 + this.baseOffset;
     }
     get beats(): number {
         return this.chart.timeCalculator.secondsToBeats(this.time)
+    }
+    get renderingBeats(): number {
+        return this.chart.timeCalculator.secondsToBeats(this.time + this.renderingOffset)
     }
     initCoordinate() {
         let {canvas, context, hitCanvas, hitContext} = this;
@@ -253,24 +264,25 @@ export class Player {
         drawLine(context, -1350, 0, 1350, 0)
         drawLine(context, 0, 900, 0, -900);
         context.restore();
+        const renderingBeats = this.renderingBeats;
         
         // console.log("rendering")
         const lineQueue = [...this.chart.judgeLines].sort((a, b) => (a.zOrder ?? 0) - (b.zOrder ?? 0));
         for (let line of this.chart.orphanLines) {
-            this.precalculate(identity.translate(675, 450).scale(1, -1), line);
+            this.precalculate(identity.translate(675, 450).scale(1, -1), line, renderingBeats);
         }
         for (let line of lineQueue) {
             if (line.optimized) {
                 continue;
             }
             context.save();
-            this.renderLine(line);
+            this.renderLine(line, renderingBeats);
             context.restore();
         }
         context.save()
         hitContext.strokeStyle = "#66ccff";
         hitContext.lineWidth = 5;
-        drawLine(hitContext, 0, 900, 1350, 0)
+        drawLine(hitContext, 0, 900, 1350, 0);
         
         context.setTransform(1, 0, 0, 1, 0, 0);
         context.drawImage(this.hitCanvas, 0, 0, 1350, 900)
@@ -321,6 +333,9 @@ export class Player {
                 const h = 32;
                 setTransform(chart.comboAttach)
                 context.fillText(COMBO_TEXT, 0, -400 + h);
+
+                setTransform(null);
+                context.fillText(this.time.toFixed(2) + " " + renderingBeats.toFixed(2), -600, -430)
             }
 
 
@@ -331,9 +346,8 @@ export class Player {
         
         // console.timeEnd("render")
     }
-    precalculate(matrix: Matrix33, judgeLine: JudgeLine) {
+    precalculate(matrix: Matrix33, judgeLine: JudgeLine, beats: number) {
         
-        const beats = this.beats;
         // const timeCalculator = this.chart.timeCalculator
         const alpha = judgeLine.getStackedValue("alpha", beats);
         if (judgeLine.nnLists.size === 0 && judgeLine.hnLists.size === 0 && alpha <= 0 && judgeLine.children.size === 0 && !judgeLine.hasAttachUI) {
@@ -358,14 +372,13 @@ export class Player {
         judgeLine.renderMatrix = myMatrix;
         if (judgeLine.children.size !== 0) {
             for (let line of judgeLine.children) {
-                this.precalculate(myMatrix, line);
+                this.precalculate(myMatrix, line, beats);
             }
         }
     }
-    renderLine(judgeLine: JudgeLine) {
+    renderLine(judgeLine: JudgeLine, beats: number) {
         const context = this.context;
         const timeCalculator = this.chart.timeCalculator;
-        const beats = this.beats;
         const alpha = judgeLine.alpha;
         const theta = judgeLine.rotate;
         const myMatrix = judgeLine.renderMatrix;
@@ -379,7 +392,7 @@ export class Player {
         const scaleX = judgeLine.extendedLayer.scaleX.getValueAt(beats);
         const scaleY = judgeLine.extendedLayer.scaleY.getValueAt(beats);
         const anchor = judgeLine.anchor;
-        console.log(scaleX, scaleY, anchor)
+        // console.log(scaleX, scaleY, anchor)
 
         let textureName = judgeLine.texture;
         if (textureName !== "line.png" && !this.textureMapping.get(textureName)) {
@@ -507,7 +520,7 @@ export class Player {
                     
                     // console.timeEnd("computeTimeRange");
                     // console.time("Rendering notes");
-                    console.log(timeRanges, startY, endY);
+                    // console.log(timeRanges, startY, endY);
                     for (let range of timeRanges) {
                         const start = range[0];
                         const end = range[1];
@@ -517,6 +530,7 @@ export class Player {
                         let noteNode: NNOrTail = list.getNodeAt(start, true);
                         // console.log(noteNode)
                         let startBeats: number;
+                        console.log(noteNode, end, start);
                         
                         while (!(noteNode.type === NodeType.TAIL)
                             && (startBeats = TC.toBeats(noteNode.startTime)) < end
@@ -524,8 +538,8 @@ export class Player {
                             // 判断是否为多押
                             const isChord = noteNode.notes.length > 1
                                 || noteNode.totalNode.noteNodes.some(node => node !== noteNode && node.notes.length)
-                                || noteNode.totalNode.holdNodes.some(node => node !== noteNode && node.notes.length)
-                            this.renderSameTimeNotes(noteNode, isChord, judgeLine, timeCalculator);
+                                || noteNode.totalNode.holdNodes.some(node => node !== noteNode && node.notes.length);
+                            this.renderSameTimeNotes(noteNode, isChord, judgeLine, timeCalculator, beats);
                             noteNode = noteNode.next;
                         }
                         
@@ -550,6 +564,14 @@ export class Player {
         this.playSounds();
     }
     lastUnplayedNNNode: NNNode | NNNodeLike<NodeType.TAIL>;
+    /**
+     * 这个不一样，在低帧率情况下，由于帧与帧时间间隔过长，中间有些Note播放不了。
+     * 
+     * 我们把播放放到每条判定线的渲染里面来减少这种情况。
+     * 
+     * 因此这里才需要实时获取beats
+     * @returns 
+     */
     playSounds() {
         if (!this.playing) {
             return;
@@ -658,7 +680,7 @@ export class Player {
                 const posX = note.positionX;
                 const yo = note.yOffset * (note.above ? 1 : -1);
                 const {x, y} = new Coordinate(posX, yo).mul(matrix);
-                const nth = Math.floor((this.beats - Math.floor(this.beats)) * 16);
+                const nth = Math.floor((beats - Math.floor(beats)) * 16);
                 const he = note.tintHitEffects;
                 
                 drawNthFrame(hitContext, he !== undefined ? this.getTintHitEffect(he) : Images.HIT_FX, nth,
@@ -667,7 +689,8 @@ export class Player {
             noteNode = <NoteNode>noteNode.next
         }
     }
-    renderSameTimeNotes(noteNode: NoteNode, chord: boolean, judgeLine: JudgeLine, timeCalculator: TimeCalculator) {
+    renderSameTimeNotes(noteNode: NoteNode, chord: boolean, judgeLine: JudgeLine, timeCalculator: TimeCalculator, beats: number) {
+        
         if (noteNode.isHold) {
             const startY = judgeLine.getRelativeFloorPositionAt(TC.toBeats(noteNode.startTime), timeCalculator) * noteNode.parentSeq.speed;
             const notes = noteNode.notes
@@ -678,6 +701,7 @@ export class Player {
                     note,
                     chord,
                     startY < 0 ? 0 : startY,
+                    beats,
                     judgeLine.getRelativeFloorPositionAt(TC.toBeats(note.endTime), timeCalculator) * note.speed
                     )
             }
@@ -687,21 +711,24 @@ export class Player {
             , len = notes.length
             for (let i = 0; i < len; i++) {
                 const note = notes[i];
+                
                 this.renderNote(
                     note,
                     chord,
-                    judgeLine.getRelativeFloorPositionAt(TC.toBeats(note.startTime), timeCalculator) * note.speed
+                    judgeLine.getRelativeFloorPositionAt(TC.toBeats(note.startTime), timeCalculator) * note.speed,
+                    beats
                 )
 
             }
         }
     }
-    renderNote(note: Note, chord: boolean, positionY: number, endpositionY?: number) {
+    renderNote(note: Note, chord: boolean, positionY: number, beats: number, endpositionY?: number) {
+        console.log("hyw?");
         // console.log(note, this.beats)
-        if (TC.toBeats(note.endTime) < this.beats) {
+        if (TC.toBeats(note.endTime) < beats) {
             return;
         }
-        if (TC.toBeats(note.startTime) - note.visibleBeats > this.beats) {
+        if (TC.toBeats(note.startTime) - note.visibleBeats > beats) {
             return;
         }
         let image: HTMLImageElement | OffscreenCanvas | ImageBitmap = note.tint ? this.getTintNote(note.tint, note.type) : Images.getImageFromType(note.type);
@@ -729,7 +756,7 @@ export class Player {
             context.globalAlpha = note.alpha / 255;
         }
         if (note.type === NoteType.hold) {
-            const isJudging = TC.toBeats(note.startTime) <= this.beats
+            const isJudging = TC.toBeats(note.startTime) <= beats
             positionY = isJudging ? zero : positionY;
             length = isJudging ? (endpositionY - zero) : length;
             context.drawImage(Images.HOLD_BODY, note.positionX - half, positionY - 10, size, length);
