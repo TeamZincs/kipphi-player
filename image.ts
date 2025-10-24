@@ -2,6 +2,7 @@ import { NoteType } from "kipphi";
 
 const CELL_SIZE = 256;
 
+type ImageSource = Blob | string;
 export class Images {
     static readonly TAP: ImageBitmap
     static readonly HOLD_BODY: ImageBitmap
@@ -17,6 +18,16 @@ export class Images {
     static async loadAndOptimize({
         tap, holdBody, holdHead, drag, flick,
         anchor, chord, below, hitFx
+    }: {
+        tap: ImageSource,
+        holdBody: ImageSource,
+        holdHead: ImageSource,
+        drag: ImageSource,
+        flick: ImageSource,
+        anchor: ImageSource,
+        chord: ImageSource,
+        below: ImageSource,
+        hitFx: ImageSource
     }) {
         // @ts-expect-error 只读是对外的
         Images.TAP = await createImageBitmap(await Images.loadImage(tap));
@@ -37,7 +48,8 @@ export class Images {
         // @ts-expect-error 只读是对外的
         Images.HIT_FX = await createImageBitmap(await Images.loadImage(hitFx));
     }
-    static loadImage(src: string) {
+    static loadImage(src: string | Blob) {
+        src = src instanceof Blob ? URL.createObjectURL(src) : src;
         return new Promise<HTMLImageElement>((resolve, reject) => {
             const img = new Image();
             img.onload = () => resolve(img);
