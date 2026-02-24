@@ -59,7 +59,7 @@ const NOTE_HEIGHT = 6;
 const getVector = (theta: number): [Vector, Vector] => [[Math.cos(theta), Math.sin(theta)], [-Math.sin(theta), Math.cos(theta)]]
 type HEX = number;
 
-export class Player {
+export class Player extends EventTarget {
     canvas: HTMLCanvasElement;
     context: CanvasRenderingContext2D;
     hitCanvas: HTMLCanvasElement;
@@ -100,6 +100,7 @@ export class Player {
     textureMapping: Map<string, ImageBitmap> = new Map();
     
     constructor(canvas: HTMLCanvasElement, audioProcessor: AudioProcessor, audio: HTMLAudioElement, background: ImageBitmap) {
+        super();
         this.canvas = canvas
         this.context = canvas.getContext("2d");
         this.audioProcessor = audioProcessor;
@@ -117,6 +118,9 @@ export class Player {
         })
         this.initGreyScreen();
     }
+    override addEventListener(type: "drawn" | "play" | "pause", listener: (e: Event) => void, options?: EventListenerOptions): void {
+        super.addEventListener(type, listener, options);
+    }
     get time(): number {
         return (this.audio.currentTime || 0) - this.chart.offset / 1000 + this.baseOffset;
     }
@@ -124,7 +128,7 @@ export class Player {
         return this.chart.timeCalculator.secondsToBeats(this.time)
     }
     get renderingBeats(): number {
-        return this.chart.timeCalculator.secondsToBeats(this.time + this.renderingOffset)
+        return this.chart.timeCalculator.secondsToBeats(this.time + this.renderingOffset * this.audio.playbackRate)
     }
     initCoordinate() {
         let {canvas, context, hitCanvas, hitContext} = this;
@@ -175,15 +179,15 @@ export class Player {
         const {canvas, context} = this;
         this.renderGreyScreen()
     }
-    computeCombo() {
+    computeCombo(renderingBeats: number) {
         const {chart} = this;
-        const beats = this.beats;
+        const beats = renderingBeats;
         const timeCalculator = chart.timeCalculator;
         let lastUncountedNNN = this.lastUncountedNNN || chart.nnnList.head.next;
         let lastUncountedTailNNN = this.lastUncountedTailNNN || chart.nnnList.head.next
         let lastCountedBeats = this.lastCountedBeats || 0;
         let combo = this.currentCombo;
-        if (!this.playing) {
+        if (!this.playing || this.time <= 1) {
             combo = 0;
             lastUncountedNNN = chart.nnnList.head.next;
             lastUncountedTailNNN = chart.nnnList.head.next;
@@ -244,15 +248,17 @@ export class Player {
         const context = this.context;
 
 
+        context.setTransform(1, 0, 0, 1, 675, 450);
         context.save();
         const hitContext = this.hitContext;
         hitContext.clearRect(0, 0, 1350, 900);
         context.drawImage(this.background, -675, -450, 1350, 900);
         // 涂灰色（背景变暗）
-        context.fillStyle = "#2227";
+        context.fillStyle = "#222c";
         context.fillRect(-27000, -18000, 54000, 36000)
         // 画出渲染范围圆
         context.strokeStyle = "#66ccff";
+        context.beginPath();
         context.arc(0, 0, RENDER_SCOPE, 0, 2 * Math.PI);
         context.stroke()
         context.restore()
@@ -300,9 +306,10 @@ export class Player {
                     context.scale(1, -1)
                 }
             }
-            this.computeCombo();
+            this.computeCombo(renderingBeats);
             context.fillStyle = "#ddd"
             context.font = "40px phigros"
+            context.textAlign = "left";
 
 
             const chart = this.chart;
@@ -334,13 +341,15 @@ export class Player {
                 setTransform(chart.comboAttach)
                 context.fillText(COMBO_TEXT, 0, -400 + h);
 
-                setTransform(null);
-                context.fillText(this.time.toFixed(2) + " " + renderingBeats.toFixed(2), -600, -430)
+
             }
-
-
-            context.restore()
         }
+        context.resetTransform();
+        context.textAlign = "center";
+        context.font = "20px phigros";
+        context.fillText(this.time.toFixed(2) + " " + renderingBeats.toFixed(2), 675, 900)
+
+        this.dispatchEvent(new Event("drawn"));
 
         // this.soundQueue = [];
         
@@ -456,8 +465,9 @@ export class Player {
         const toCenter: Vector = [675 - transformedX, 450 - transformedY];
         // 法向量是单位向量，分母是1，不写
         /** the distance between the center and the line */
-        const innerProd = innerProduct(toCenter, nVector)
-        const getYs = judgeLine.cover ? (offset: number) => {
+        const innerProd = innerProduct(toCenter, nVector);
+        const judgeLineCover = judgeLine.cover;
+        const getYs = judgeLineCover ? (offset: number) => {
             
             const distance: number = Math.abs(innerProd + offset);
             let startY = distance - RENDER_SCOPE + offset;
@@ -466,7 +476,7 @@ export class Player {
             return [startY, endY]
         } : (offset: number) => {
             
-            const distance: number = Math.abs(innerProd);
+            const distance: number = Math.abs(innerProd + offset);
             const startY = distance - RENDER_SCOPE + offset; // 显示线下音符
             const endY = distance + RENDER_SCOPE + offset;
             return [startY, endY]
@@ -530,7 +540,7 @@ export class Player {
                         let noteNode: NNOrTail = list.getNodeAt(start, true);
                         // console.log(noteNode)
                         let startBeats: number;
-                        console.log(noteNode, end, start);
+                        // console.log(noteNode, end, start);
                         
                         while (!(noteNode.type === NodeType.TAIL)
                             && (startBeats = TC.toBeats(noteNode.startTime)) < end
@@ -539,7 +549,7 @@ export class Player {
                             const isChord = noteNode.notes.length > 1
                                 || noteNode.totalNode.noteNodes.some(node => node !== noteNode && node.notes.length)
                                 || noteNode.totalNode.holdNodes.some(node => node !== noteNode && node.notes.length);
-                            this.renderSameTimeNotes(noteNode, isChord, judgeLine, timeCalculator, beats);
+                            this.renderSameTimeNotes(noteNode, isChord, judgeLine, judgeLineCover, timeCalculator, beats);
                             noteNode = noteNode.next;
                         }
                         
@@ -689,7 +699,11 @@ export class Player {
             noteNode = <NoteNode>noteNode.next
         }
     }
-    renderSameTimeNotes(noteNode: NoteNode, chord: boolean, judgeLine: JudgeLine, timeCalculator: TimeCalculator, beats: number) {
+    /**
+     * 
+     */
+    // 能只在外面拿一遍cover就绝对不在这里面拿10遍cover（
+    renderSameTimeNotes(noteNode: NoteNode, chord: boolean, judgeLine: JudgeLine, cover: boolean, timeCalculator: TimeCalculator, beats: number) {
         
         if (noteNode.isHold) {
             const startY = judgeLine.getRelativeFloorPositionAt(TC.toBeats(noteNode.startTime), timeCalculator) * noteNode.parentSeq.speed;
@@ -702,6 +716,7 @@ export class Player {
                     chord,
                     startY < 0 ? 0 : startY,
                     beats,
+                    cover,
                     judgeLine.getRelativeFloorPositionAt(TC.toBeats(note.endTime), timeCalculator) * note.speed
                     )
             }
@@ -716,19 +731,23 @@ export class Player {
                     note,
                     chord,
                     judgeLine.getRelativeFloorPositionAt(TC.toBeats(note.startTime), timeCalculator) * note.speed,
-                    beats
+                    beats,
+                    cover
                 )
 
             }
         }
     }
-    renderNote(note: Note, chord: boolean, positionY: number, beats: number, endpositionY?: number) {
-        console.log("hyw?");
+    renderNote(note: Note, chord: boolean, positionY: number, beats: number, cover: boolean, endpositionY?: number) {
+        // console.log("hyw?");
         // console.log(note, this.beats)
         if (TC.toBeats(note.endTime) < beats) {
             return;
         }
         if (TC.toBeats(note.startTime) - note.visibleBeats > beats) {
+            return;
+        }
+        if (positionY < 0 && cover) {
             return;
         }
         let image: HTMLImageElement | OffscreenCanvas | ImageBitmap = note.tint ? this.getTintNote(note.tint, note.type) : Images.getImageFromType(note.type);
@@ -834,10 +853,12 @@ export class Player {
         this.audio.play()
         this.playing = true;
         this.update();
+        this.dispatchEvent(new Event("play"));
     }
     pause() {
         this.audio.pause()
         this.playing = false
+        this.dispatchEvent(new Event("pause"));
     }
     receive(chart: Chart, textureFetcher: (name: string) => Promise<ImageBitmap>) {
         this.chart = chart;
