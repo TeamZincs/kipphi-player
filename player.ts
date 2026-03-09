@@ -312,8 +312,8 @@ export class Player extends EventTarget {
         context.save()
 
         context.strokeStyle = "#FFFFFF"
-        drawLine(context, -1350, 0, 1350, 0)
-        drawLine(context, 0, 900, 0, -900);
+        // drawLine(context, -1350, 0, 1350, 0)
+        // drawLine(context, 0, 900, 0, -900);
         context.restore();
         const renderingBeats = this.renderingBeats;
         
@@ -333,7 +333,7 @@ export class Player extends EventTarget {
         context.save()
         hitContext.strokeStyle = "#66ccff";
         hitContext.lineWidth = 5;
-        drawLine(hitContext, 0, 900, 1350, 0);
+        // drawLine(hitContext, 0, 900, 1350, 0);
         
         context.setTransform(1, 0, 0, 1, 0, 0);
         context.drawImage(this.hitCanvas, 0, 0, 1350, 900)
