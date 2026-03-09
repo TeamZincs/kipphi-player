@@ -1,4 +1,4 @@
-/* #node{import type { CanvasRenderingContext2D } from "skia-canvas";} */
+import type { CanvasRenderingContext2D } from "skia-canvas";
 
 export type Vector = [number, number];
 

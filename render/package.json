@@ -1,0 +1,21 @@
+{
+  "name": "kpp-render",
+  "module": "index.ts",
+  "type": "module",
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "node-av": "^5.2.2",
+    "skia-canvas": "^3.0.8"
+  },
+  "trustedDependencies": [
+    "@seydx/node-av-win32-x64-mingw",
+    "@seydx/node-av-win32-x64-msvc",
+    "node-av",
+    "skia-canvas"
+  ]
+}

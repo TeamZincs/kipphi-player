@@ -17,8 +17,8 @@
     "util.ts",
     "LICENSE"
   ],
-  "module": "index.ts",
-  "main": "index.ts",
+  "module": "index.js",
+  "main": "index.js",
   "type": "module",
   "devDependencies": {
     "@types/bun": "latest"
@@ -28,5 +28,8 @@
   },
   "dependencies": {
     "kipphi": "^2.0.1"
+  },
+  "scripts": {
+    "build": "bun build index.ts --outfile=index.js --external=kipphi"
   }
 }

@@ -15,20 +15,13 @@ import {
     TC,
     NNNodeLike
 } from "kipphi";
-/// #default
-import { AudioProcessor } from "./audio";
-/// #enddefault
 import { drawLine, innerProduct, rgba } from "./util";
 import { Coordinate, identity, Matrix33 } from "./matrix";
 import { drawNthFrame, Images } from "./image";
 import { type Vector } from "./util";
 import { NOTE_HEIGHT, NOTE_WIDTH } from "./constants";
-/*
-#node {
 import { Canvas, type CanvasRenderingContext2D, type Image, type ImageData } from "skia-canvas";
 import { AudioProcessor } from "./audioProcessor";
-}
-*/
 
 
 // 扩展JudgeLine，在上面缓存每帧的数据
@@ -64,11 +57,6 @@ const HIT_FX_SIZE = 1024;
 const getVector = (theta: number): [Vector, Vector] => [[Math.cos(theta), Math.sin(theta)], [-Math.sin(theta), Math.cos(theta)]]
 type HEX = number;
 
-// #default
-type ProcessedTexture = OffscreenCanvas | ImageBitmap;
-// #enddefault
-/*
-#node {
 type HTMLCanvasElement = Canvas;
 type OffscreenCanvas = Canvas;
 type ImageBitmap = Image;
@@ -76,8 +64,6 @@ type HTMLImageElement = Image;
 type ProcessedTexture = Canvas;
 const OffscreenCanvas = Canvas;
 type OffscreenCanvasRenderingContext2D = CanvasRenderingContext2D;
-}
-*/
 
 export class Player extends EventTarget {
     canvas: HTMLCanvasElement;
@@ -85,9 +71,6 @@ export class Player extends EventTarget {
     context: CanvasRenderingContext2D;
     hitContext: OffscreenCanvasRenderingContext2D;
     chart: Chart;
-    // #default
-    audio: HTMLAudioElement;
-    // #enddefault
     private audioProcessor: AudioProcessor;
     playing: boolean;
     background: ImageBitmap;
@@ -124,9 +107,6 @@ export class Player extends EventTarget {
     constructor(
         canvas: HTMLCanvasElement,
         audioProcessor: AudioProcessor,
-        // #default
-        audio: HTMLAudioElement,
-        // #enddefault
         background: ImageBitmap) {
         super();
         this.canvas = canvas
@@ -140,40 +120,21 @@ export class Player extends EventTarget {
         this.noteSize = NOTE_WIDTH;
         this.noteHeight = NOTE_HEIGHT;
         this.initCoordinate();
-        // #default
-        this.audio = audio;
-        this.audio.addEventListener("ended", () => {
-            this.playing = false;
-        })
-        // #enddefault
         this.initGreyScreen();
     }
     override addEventListener(type: "drawn" | "play" | "pause", listener: (e: Event) => void, options?: EventListenerOptions): void {
         super.addEventListener(type, listener, options);
     }
-/* #node {
-
-    audioCurrentTime: number = 0;
+audioCurrentTime: number = 0;
     playbackRate: number = 1;
-} */
     get time(): number {
-        // #default
-        return (this.audio.currentTime || 0) - this.chart.offset / 1000 + this.baseOffset;
-        // #enddefault
-        /* #node {
         return this.audioCurrentTime - this.chart.offset / 1000 + this.baseOffset;
-        } */
     }
     get beats(): number {
         return this.chart.timeCalculator.secondsToBeats(this.time)
     }
     get renderingBeats(): number {
-        // #default
-        return this.chart.timeCalculator.secondsToBeats(this.time + this.renderingOffset * this.audio.playbackRate)
-        // #enddefault
-        /* #node {
         return this.chart.timeCalculator.secondsToBeats(this.time + this.renderingOffset * this.playbackRate)
-        } */
     }
     initCoordinate() {
         let {canvas, context, hitCanvas, hitContext} = this;
@@ -629,11 +590,6 @@ export class Player extends EventTarget {
      * @returns 
      */
     playSounds() {
-        // #default
-        if (!this.playing) {
-            return;
-        }
-        // #enddefault
         const beats = this.beats;
         const timeCalculator = this.chart.timeCalculator;
         const lastNNN: NNNOrTail = this.lastUnplayedNNNode;
@@ -854,11 +810,6 @@ export class Player extends EventTarget {
         context.fillStyle = "#" + tint.toString(16).padStart(6, "0");
         context.fillRect(0, 0, NOTE_WIDTH, NOTE_HEIGHT);
         map.set(key, source); // 在ImageBitmap创建完成之前，先使用Canvas临时代替
-        // #default
-        createImageBitmap(source).then((bmp: ImageBitmap) => {
-            map.set(key, bmp);
-        });
-        // #enddefault
         return source;
     }
     getTintHitEffect(tint: HEX): ProcessedTexture {
@@ -881,38 +832,8 @@ export class Player extends EventTarget {
         context.globalCompositeOperation = 'multiply';
         context.drawImage(HIT_FX, 0, 0, HIT_FX_SIZE, HIT_FX_SIZE);
         map.set(key, source);
-// #default
-        createImageBitmap(source).then((bmp: ImageBitmap) => {
-            map.set(key, bmp);
-        });
-        // #enddefault
         return source;
     }
-    // #default
-    private update() {
-        if (!this.playing) {
-            return;
-        }
-        // console.log("anifr")
-        requestAnimationFrame(() => {
-            // console.log("render")
-            this.render();
-            this.update();
-        })
-        this.lastBeats = this.beats
-    }
-    play() {
-        this.audio.play()
-        this.playing = true;
-        this.update();
-        this.dispatchEvent(new Event("play"));
-    }
-    pause() {
-        this.audio.pause()
-        this.playing = false
-        this.dispatchEvent(new Event("pause"));
-    }
-    // #enddefault
 
     receive(chart: Chart, textureFetcher: (name: string) => Promise<ImageBitmap>) {
         this.chart = chart;

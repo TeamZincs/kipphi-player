@@ -1,0 +1,7 @@
+{
+    "files.readonlyInclude": {
+        "render/player.ts": true,
+        "render/image.ts": true,
+        "render/matrix.ts": true
+    }
+}

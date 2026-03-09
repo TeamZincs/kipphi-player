@@ -1,12 +1,8 @@
 import { NoteType } from "kipphi";
 import { NOTE_HEIGHT, NOTE_WIDTH } from "./constants";
 
-// #default
-const __IS_BROWSER = true;
-// #enddefault
 
 
-/* #node {
 import { Canvas, Image, type CanvasRenderingContext2D } from "skia-canvas";
 async function createImageBitmap(s) {
     return s;
@@ -19,10 +15,9 @@ type OffscreenCanvas = Canvas;
 const OffscreenCanvas = Canvas;
 
 const __IS_BROWSER = false;
-} */
 const CELL_SIZE = 256;
 
-type ImageSource = Blob | string/* #node{ | Buffer} */;
+type ImageSource = Blob | string| Buffer;
 export class Images {
     static readonly TAP: ImageBitmap
     static readonly TAP_HL: ImageBitmap
@@ -104,28 +99,16 @@ export class Images {
     static async loadNoteImage(src: ImageSource) {
         const img = await Images.loadImage(src);
         const canvas = new OffscreenCanvas(NOTE_WIDTH, NOTE_HEIGHT);
-        // #default
-        const w = img.naturalWidth;
-        const h = img.naturalHeight;
-        // #enddefault
-        /* #node{
         const w = img.width;
         const h = img.height;
-        } */
         canvas.getContext("2d")
             .drawImage(img, NOTE_WIDTH / 2 - w / 2, NOTE_HEIGHT / 2 - h / 2, w, h);
         return canvas
     }
     static async loadHoldImage(src: ImageSource) {
         const img = await Images.loadImage(src);
-        // #default
-        const w = img.naturalWidth;
-        const h = img.naturalHeight;
-        // #enddefault
-        /* #node{
         const w = img.width;
         const h = img.height;
-        } */
         const canvas = new OffscreenCanvas(NOTE_WIDTH, h);
         canvas.getContext("2d")
             .drawImage(img, NOTE_WIDTH / 2 - w / 2, 0, w, h);
