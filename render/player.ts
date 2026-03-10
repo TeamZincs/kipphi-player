@@ -273,8 +273,8 @@ audioCurrentTime: number = 0;
         context.save()
 
         context.strokeStyle = "#FFFFFF"
-        drawLine(context, -1350, 0, 1350, 0)
-        drawLine(context, 0, 900, 0, -900);
+        // drawLine(context, -1350, 0, 1350, 0)
+        // drawLine(context, 0, 900, 0, -900);
         context.restore();
         const renderingBeats = this.renderingBeats;
         
@@ -294,7 +294,7 @@ audioCurrentTime: number = 0;
         context.save()
         hitContext.strokeStyle = "#66ccff";
         hitContext.lineWidth = 5;
-        drawLine(hitContext, 0, 900, 1350, 0);
+        // drawLine(hitContext, 0, 900, 1350, 0);
         
         context.setTransform(1, 0, 0, 1, 0, 0);
         context.drawImage(this.hitCanvas, 0, 0, 1350, 900)
@@ -449,7 +449,6 @@ audioCurrentTime: number = 0;
                 -scaledWidth * anchor[0], -scaledHeight * anchor[1], scaledWidth, scaledHeight)
             context.globalAlpha = 1;
         }
-        context.scale(1, -1)
 
         // Draw Anchor
 
@@ -457,7 +456,6 @@ audioCurrentTime: number = 0;
         context.drawImage(Images.ANCHOR, -10, -10)
         if (this.showsLineID) {
             context.save();
-            context.scale(1, -1);
             context.fillStyle = "white";
             context.font = "40px phigros";
                 
@@ -492,7 +490,6 @@ audioCurrentTime: number = 0;
         const drawScope = (endY: number, startY: number) => {
             if (endY<=1e-6) return
             context.save()
-            context.scale(1, -1)
             context.font = "80px phigros";
             context.textBaseline = "middle";
             context.strokeStyle = "#66ccff"
@@ -678,7 +675,7 @@ audioCurrentTime: number = 0;
         if (noteNode.type === NodeType.TAIL) {
             return;
         }
-        if (noteNode !== end)
+        // if (noteNode !== end)
         // console.log("start", start, startBeats, endBeats)
         while (noteNode !== end) {
             const notes = noteNode.notes
@@ -763,26 +760,31 @@ audioCurrentTime: number = 0;
             endpositionY += note.yOffset;
             zero = note.yOffset;
         }
-        if (!note.above) {
-            positionY = -positionY;
-            endpositionY = -endpositionY
-            zero = -zero;
-        }
+
+
+        positionY = -positionY;
+        endpositionY = -endpositionY
+        zero = -zero;
+        
         let length = endpositionY - positionY
         const size = this.noteSize * note.size;
         const half = size / 2;
         const height = this.noteHeight;
         // console.log(NoteType[note.type])
         const opac = note.alpha < 255
+        context.save();
+        if (!note.above) {
+            context.scale(1, -1);
+        }
         if (opac) {
-            context.save();
             context.globalAlpha = note.alpha / 255;
         }
         if (note.type === NoteType.hold) {
             const isJudging = TC.toBeats(note.startTime) <= beats
             positionY = isJudging ? zero : positionY;
             length = isJudging ? (endpositionY - zero) : length;
-            context.drawImage(Images.HOLD_BODY, note.positionX - half, positionY - 10, size, length);
+            length = -length
+            context.drawImage(Images.HOLD_BODY, note.positionX - half, positionY - length - NOTE_HEIGHT / 2, size, length);
         }
             
         context.drawImage(image, note.positionX - half, positionY - 10, size, height)
@@ -790,11 +792,10 @@ audioCurrentTime: number = 0;
         // 不再使用叠加的方法
         
         if (!note.above) {
-            context.drawImage(Images.BELOW, note.positionX - half, positionY - 10, size, height);
+            context.drawImage(Images.BELOW, note.positionX - half, positionY - NOTE_HEIGHT / 2, size, height);
         }
-        if (opac) {
-            context.restore()
-        }
+        context.restore()
+        
     }
     getTintNote(tint: HEX, type: NoteType, chord: boolean): ProcessedTexture {
         const map = this.tintNotesMapping;

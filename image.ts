@@ -66,7 +66,7 @@ export class Images {
         // @ts-expect-error 只读是对外的
         Images.TAP = await createImageBitmap(await Images.loadNoteImage(tap));
         // @ts-expect-error 只读是对外的
-        Images.HOLD_BODY = await createImageBitmap(await Images.loadNoteImage(holdBody));
+        Images.HOLD_BODY = await createImageBitmap(await Images.loadHoldImage(holdBody));
         // @ts-expect-error 只读是对外的
         Images.HOLD_HEAD = await createImageBitmap(await Images.loadNoteImage(holdHead));
         // @ts-expect-error 只读是对外的
@@ -80,7 +80,7 @@ export class Images {
         // @ts-expect-error 只读是对外的
         Images.BELOW = await createImageBitmap(await Images.loadNoteImage(below));
         // @ts-expect-error 只读是对外的
-        Images.HIT_FX = await createImageBitmap(await Images.loadNoteImage(hitFx));
+        Images.HIT_FX = await createImageBitmap(await Images.loadImage(hitFx));
 
         // @ts-expect-error 只读是对外的
         Images.TAP_HL = await createImageBitmap(tapHl ? Images.loadNoteImage(tapHl) : Images.generateHL(Images.TAP));

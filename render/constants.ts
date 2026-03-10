@@ -1,2 +1,2 @@
-export const NOTE_WIDTH = 175;
-export const NOTE_HEIGHT = 20;
+export const NOTE_WIDTH = 200;
+export const NOTE_HEIGHT = 30;
