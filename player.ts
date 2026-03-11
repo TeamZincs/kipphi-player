@@ -308,7 +308,7 @@ export class Player extends EventTarget {
         hitContext.clearRect(0, 0, 1350, 900);
         context.drawImage(this.background, -675, -450, 1350, 900);
         // 涂灰色（背景变暗）
-        context.fillStyle = "#222c";
+        context.fillStyle = "#0008";
         context.fillRect(-27000, -18000, 54000, 36000)
         // 画出渲染范围圆
         context.strokeStyle = "#66ccff";
