@@ -1,3 +1,4 @@
+// ===-=== Generated, do no edit. ===-===
 import type { CanvasRenderingContext2D } from "skia-canvas";
 
 export type Vector = [number, number];

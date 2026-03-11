@@ -11,11 +11,17 @@ import { Player } from "./player";
 import { Images } from "./image"
 import { Chart } from "kipphi";
 import { AudioProcessor } from "./audioProcessor";
+import type { Respack } from "./respack";
 
 
 
 export function useFont(path: string) {
     FontLibrary.use("phigros", path)
+}
+
+let respack: Respack = null;
+export function useRespack(resp: Respack) {
+    respack = resp;
 }
 
 /**
@@ -33,7 +39,8 @@ export async function renderChartFast(
     chart: Chart,
     illustrationBlobOrBuffer: Blob | Buffer,
     textureFetcher: (name: string) => Promise<Buffer>,
-    audioBuffer: Buffer
+    audioBuffer: Buffer,
+    range?: [number, number]
 ): Promise<{
     out: Buffer;
     duration: number;
@@ -42,7 +49,9 @@ export async function renderChartFast(
     const width = 1350;
     const height = 900;
     const fps = 60;
-    const duration = chart.duration;
+    const left = range && range[0] || 0;
+    const right = range && range[1] ? Math.min(range[1], chart.duration) : chart.duration;
+    const duration = right - left;
     const totalFrames = Math.ceil(duration * fps);
 
     console.log(`🎬 开始快速渲染：${totalFrames} 帧 @ ${fps}fps, 包含音频`);
@@ -68,7 +77,7 @@ export async function renderChartFast(
     // 初始化 canvas 和 player
     const canvas = new Canvas(width, height);
     const illustration = await Images.loadImage(illustrationBlobOrBuffer);
-    const player = new Player(canvas, audioProcessor, illustration);
+    const player = new Player(canvas, audioProcessor, illustration, respack);
     audioProcessor.linkPlayer(player);
     player.receive(chart, async (name) => {
         const texture = await textureFetcher(name);
@@ -307,14 +316,14 @@ export async function renderChartFast(
     async function* generateFrames() {
         for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
             // 更新播放器状态
-            const currentTime = frameIndex / fps;
+            const currentTime = left + frameIndex / fps;
             player.audioCurrentTime = currentTime;
             player.render();
 
             // 在渲染时消费该时间点的音效条目
             // 消费当前帧时间范围内的所有音效
             const frameStartTime = currentTime;
-            const frameEndTime = (frameIndex + 1) / fps;
+            const frameEndTime = left + (frameIndex + 1) / fps;
             
             // 获取并消费该时间段内的音效
             const soundEntries = audioProcessor.getSoundEffectsInTimeRange(frameStartTime, frameEndTime);

@@ -50,7 +50,7 @@ export function buildFile(inputFile: string): void {
     console.log(`Processing: ${inputFile}`);
 
     const sourceContent = readFileSync(inputFile, 'utf-8');
-    const processedContent = processFile(sourceContent);
+    const processedContent = "// ===-=== Generated, do no edit. ===-===\n" + processFile(sourceContent);
 
     const OUTPUT_DIR = join(__dirname, '../render');
     if (!existsSync(OUTPUT_DIR)) {

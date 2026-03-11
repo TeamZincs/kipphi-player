@@ -23,6 +23,7 @@ import { Coordinate, identity, Matrix33 } from "./matrix";
 import { drawNthFrame, Images } from "./image";
 import { type Vector } from "./util";
 import { NOTE_HEIGHT, NOTE_WIDTH } from "./constants";
+import type { Respack } from "./respack";
 /*
 #node {
 import { Canvas, type CanvasRenderingContext2D, type Image, type ImageData } from "skia-canvas";
@@ -98,8 +99,6 @@ export class Player extends EventTarget {
     lastBeats: number;
     lastRenderingBeats: number;
 
-    tintNotesMapping: Map<HEX, ProcessedTexture> = new Map();
-    tintEffectMapping: Map<HEX, ProcessedTexture> = new Map();
 
     greenLine: number = 0;
 
@@ -127,7 +126,9 @@ export class Player extends EventTarget {
         // #default
         audio: HTMLAudioElement,
         // #enddefault
-        background: ImageBitmap) {
+        background: ImageBitmap,
+        public respack: Respack
+    ) {
         super();
         this.canvas = canvas
         this.context = canvas.getContext("2d");
@@ -169,10 +170,18 @@ export class Player extends EventTarget {
     }
     get renderingBeats(): number {
         // #default
-        return this.chart.timeCalculator.secondsToBeats(this.time + this.renderingOffset * this.audio.playbackRate)
+        return this.chart.timeCalculator.secondsToBeats(this.renderingTime);
         // #enddefault
         /* #node {
         return this.chart.timeCalculator.secondsToBeats(this.time + this.renderingOffset * this.playbackRate)
+        } */
+    }
+    get renderingTime(): number {
+        // #default
+        return this.time + this.renderingOffset * this.audio.playbackRate;
+        // #enddefault
+        /* #node {
+        return this.time + this.renderingOffset * this.playbackRate;
         } */
     }
     initCoordinate() {
@@ -433,6 +442,7 @@ export class Player extends EventTarget {
     }
     renderLine(judgeLine: JudgeLine, beats: number) {
         const context = this.context;
+        const respack = this.respack;
         const timeCalculator = this.chart.timeCalculator;
         const alpha = judgeLine.alpha;
         const theta = judgeLine.rotate;
@@ -547,8 +557,9 @@ export class Player extends EventTarget {
             context.restore()
         }
         
-
-        const hitRenderLimit = beats > 0.66 ? beats - 0.66 : 0 // 渲染 0.66秒内的打击特效
+        const hitFxDuration = respack.hitFxDuration;
+        const hitRenderLimitSecs = this.renderingTime > hitFxDuration ? this.renderingTime - hitFxDuration : 0;
+        const hitRenderLimitBeats = timeCalculator.secondsToBeats(hitRenderLimitSecs); // 渲染 ? 秒内的打击特效
         const holdTrees = judgeLine.hnLists;
         const noteTrees = judgeLine.nnLists;
 
@@ -603,9 +614,9 @@ export class Player extends EventTarget {
                 // 打击特效
                 if (beats > 0) {
                     if (list instanceof HNList) {
-                        this.renderHoldHitEffects(myMatrix, list, beats, hitRenderLimit, beats, timeCalculator)
+                        this.renderHoldHitEffects(myMatrix, list, beats, hitRenderLimitBeats, beats, timeCalculator)
                     } else {
-                        this.renderHitEffects(myMatrix, list, hitRenderLimit, beats, timeCalculator)
+                        this.renderHitEffects(myMatrix, list, hitRenderLimitBeats, beats, timeCalculator)
                     }
                 }
                 // console.timeEnd("Rendering hit effects");
@@ -674,7 +685,7 @@ export class Player extends EventTarget {
     }
     renderHitEffects(matrix: Matrix33, tree: NNList, startBeats: number, endBeats: number, timeCalculator: TimeCalculator) {
         let noteNode = tree.getNodeAt(startBeats, true);
-        const {hitContext} = this;
+        const { hitContext, respack, renderingTime } = this;
         // console.log(hitContext.getTransform())
         const end = tree.getNodeAt(endBeats);
         if (noteNode.type === NodeType.TAIL) {
@@ -694,8 +705,7 @@ export class Player extends EventTarget {
                 const {x, y} = new Coordinate(posX, yo).mul(matrix);
                 // console.log("he", x, y);
                 const he = note.tintHitEffects;
-                const nth = Math.floor((this.time - timeCalculator.toSeconds(beats)) * 16);
-                drawNthFrame(hitContext, he !== undefined ? this.getTintHitEffect(he) : Images.HIT_FX, nth,x - HALF_HIT, y - HALF_HIT, HIT_EFFECT_SIZE, HIT_EFFECT_SIZE)
+                respack.hitDrawer(hitContext, x, y, HIT_EFFECT_SIZE, renderingTime - timeCalculator.toSeconds(beats), he)
             }
 
             noteNode = <NoteNode>noteNode.next
@@ -713,7 +723,7 @@ export class Player extends EventTarget {
      */
     renderHoldHitEffects(matrix: Matrix33, tree: HNList, beats: number, startBeats: number, endBeats: number, timeCalculator: TimeCalculator) {
         const start = tree.getNodeAt(startBeats, true);
-        const {hitContext} = this;
+        const { hitContext, respack, renderingTime } = this;
         let noteNode = start;
         const end = tree.getNodeAt(endBeats);
         if (noteNode.type === NodeType.TAIL) {
@@ -735,11 +745,8 @@ export class Player extends EventTarget {
                 const posX = note.positionX;
                 const yo = note.yOffset * (note.above ? 1 : -1);
                 const {x, y} = new Coordinate(posX, yo).mul(matrix);
-                const nth = Math.floor((beats - Math.floor(beats)) * 16);
-                const he = note.tintHitEffects;
-                
-                drawNthFrame(hitContext, he !== undefined ? this.getTintHitEffect(he) : Images.HIT_FX, nth,
-                x - HALF_HIT, y - HALF_HIT, HIT_EFFECT_SIZE, HIT_EFFECT_SIZE)
+                const tintHE = note.tintHitEffects;
+                respack.hitDrawer(hitContext, x, y, HIT_EFFECT_SIZE, renderingTime - timeCalculator.toSeconds(Math.floor(beats)), tintHE)
             }
             noteNode = <NoteNode>noteNode.next
         }
@@ -795,8 +802,8 @@ export class Player extends EventTarget {
         if (positionY < 0 && cover) {
             return;
         }
-        let image: HTMLImageElement | OffscreenCanvas | ImageBitmap = note.tint ? this.getTintNote(note.tint, note.type, chord) : Images.getImageFromType(note.type, chord);
         const context = this.context;
+        const respack = this.respack;
         let zero = 0;
         
         if (note.yOffset) {
@@ -813,8 +820,6 @@ export class Player extends EventTarget {
         let length = endpositionY - positionY
         const size = this.noteSize * note.size;
         const half = size / 2;
-        const height = this.noteHeight;
-        // console.log(NoteType[note.type])
         const opac = note.alpha < 255
         context.save();
         if (!note.above) {
@@ -828,66 +833,29 @@ export class Player extends EventTarget {
             positionY = isJudging ? zero : positionY;
             length = isJudging ? (endpositionY - zero) : length;
             length = -length
-            context.drawImage(Images.HOLD_BODY, note.positionX - half, positionY - length - NOTE_HEIGHT / 2, size, length);
+            const HOLD_BODY = chord ? respack.HOLD_BODY_HL : respack.HOLD_BODY;
+            const HOLD_HEAD = chord ? respack.HOLD_HEAD_HL : respack.HOLD_HEAD;
+            const HOLD_TAIL = chord ? respack.HOLD_TAIL_HL : respack.HOLD_TAIL;
+            context.drawImage(HOLD_BODY, note.positionX - half, positionY - length, size, length);
+            if (!isJudging || respack.holdKeepHead) {
+                const h = size * (HOLD_HEAD.height / HOLD_HEAD.width)
+                context.drawImage(HOLD_HEAD, note.positionX - half, positionY - (respack.holdCompact ? h / 2 : 0),
+                    size, h);
+            }
+            const tailHeight = size * (HOLD_TAIL.height / HOLD_TAIL.width)
+            context.drawImage(HOLD_TAIL, note.positionX - half, positionY - length - (respack.holdCompact ? tailHeight / 2 : tailHeight),
+                size, tailHeight);
+        } else {
+            respack.noteDrawer(context, note.positionX, positionY, size, this.noteSize, note.type, chord, note.tint);
         }
-            
-        context.drawImage(image, note.positionX - half, positionY - 10, size, height)
         
         // 不再使用叠加的方法
         
         if (!note.above) {
-            context.drawImage(Images.BELOW, note.positionX - half, positionY - NOTE_HEIGHT / 2, size, height);
+            context.drawImage(Images.BELOW, note.positionX - half, positionY - NOTE_HEIGHT / 2, size, NOTE_HEIGHT);
         }
         context.restore()
         
-    }
-    getTintNote(tint: HEX, type: NoteType, chord: boolean): ProcessedTexture {
-        const map = this.tintNotesMapping;
-        const key = tint | type << 24 | (chord ? 1 : 0) << 25; // 26位整形表示一个类型的Note贴图
-        const canBeSource = map.get(key);
-        if (canBeSource) {
-            return canBeSource;
-        }
-        const source = new OffscreenCanvas(NOTE_WIDTH, NOTE_HEIGHT);
-        const context = source.getContext('2d');
-        context.drawImage(Images.getImageFromType(type, chord), 0, 0, NOTE_WIDTH, NOTE_HEIGHT);
-        context.globalCompositeOperation = 'multiply';
-        context.fillStyle = "#" + tint.toString(16).padStart(6, "0");
-        context.fillRect(0, 0, NOTE_WIDTH, NOTE_HEIGHT);
-        map.set(key, source); // 在ImageBitmap创建完成之前，先使用Canvas临时代替
-        // #default
-        createImageBitmap(source).then((bmp: ImageBitmap) => {
-            map.set(key, bmp);
-        });
-        // #enddefault
-        return source;
-    }
-    getTintHitEffect(tint: HEX): ProcessedTexture {
-        const map = this.tintEffectMapping;
-        const key = tint;
-        const canBeSource = map.get(key);
-        if (canBeSource) {
-            return canBeSource;
-        }
-        const HIT_FX = Images.HIT_FX;
-        const source = new OffscreenCanvas(HIT_FX_SIZE, HIT_FX_SIZE);
-        const context = source.getContext('2d');
-        context.clearRect(0, 0, HIT_FX_SIZE, HIT_FX_SIZE);
-        context.drawImage(HIT_FX, 0, 0, HIT_FX_SIZE, HIT_FX_SIZE);
-
-        context.globalCompositeOperation = 'source-in';
-        context.fillStyle = "#" + tint.toString(16);
-        context.fillRect(0, 0, HIT_FX_SIZE, HIT_FX_SIZE);
-
-        context.globalCompositeOperation = 'multiply';
-        context.drawImage(HIT_FX, 0, 0, HIT_FX_SIZE, HIT_FX_SIZE);
-        map.set(key, source);
-// #default
-        createImageBitmap(source).then((bmp: ImageBitmap) => {
-            map.set(key, bmp);
-        });
-        // #enddefault
-        return source;
     }
     // #default
     private update() {

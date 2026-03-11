@@ -1,4 +1,4 @@
-export { renderChartFast, useFont } from "./render";
+export * from "./render";
 export { Images } from "./image";
 
 

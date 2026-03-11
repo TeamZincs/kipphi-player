@@ -2,6 +2,8 @@
     "files.readonlyInclude": {
         "render/player.ts": true,
         "render/image.ts": true,
-        "render/matrix.ts": true
+        "render/matrix.ts": true,
+        "render/respack.ts": true,
+        "render/respack-phira.ts": true
     }
 }

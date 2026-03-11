@@ -7,5 +7,7 @@
 			"path": "../kpp-render"
 		}
 	],
-	"settings": {}
+	"settings": {
+		"liveServer.settings.multiRootWorkspaceName": "kpp"
+	}
 }
