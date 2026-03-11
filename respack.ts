@@ -206,12 +206,25 @@ export class Respack {
     static async tintImage(image: ImageBitmap, tint: number) {
         const canvas = new OffscreenCanvas(image.width, image.height);
         const context = canvas.getContext("2d");
+        //context.drawImage(image, 0, 0);
+        //context.globalCompositeOperation = "source-in";
+        // context.drawImage(image, 0, 0);
+        // context.globalCompositeOperation = "multiply";
+        // context.fillStyle = `#${tint.toString(16).padStart(8, "0")}`;
+        // context.fillRect(0, 0, image.width, image.height);
         context.drawImage(image, 0, 0);
-        context.globalCompositeOperation = "source-in";
-        context.fillStyle = `#${tint.toString(16).padStart(8, "0")}`;
-        context.fillRect(0, 0, image.width, image.height);
-        context.globalCompositeOperation = "multiply";
-        context.drawImage(image, 0, 0);
+        const data = context.getImageData(0, 0, image.width, image.height);
+        console.log(data.data);
+        for (let i = 0; i < data.data.length; i += 4) {
+            data.data[i] = Math.round(data.data[i] * (tint >>> 16 & 0xff) / 255);
+            data.data[i + 1] = Math.round(data.data[i + 1] * (tint >>> 8 & 0xff) / 255);
+            data.data[i + 2] = Math.round(data.data[i + 2] * (tint & 0xff) / 255);
+            data.data[i + 3] = Math.round(data.data[i + 3] * (tint >>> 24) / 255);
+            // 踩坑：要用>>>，防止tint被认为是三十二位负数
+        }
+        
+        console.log(data.data, data.data.every((v, i) => i % 4 !== 3 || v === 0));
+        context.putImageData(data, 0, 0);
         return await createImageBitmap(canvas);
     }
 
