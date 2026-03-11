@@ -37,7 +37,7 @@ export class Images {
 
     static async loadAndOptimize({
         // tap, holdBody, holdHead, drag, flick,
-        anchor, chord, below, hitFx,
+        anchor, chord, below, //hitFx,
         // holdHeadHl,
         // tapHl,
         // dragHl,
@@ -51,7 +51,7 @@ export class Images {
         anchor: ImageSource,
         chord: ImageSource,
         below: ImageSource,
-        hitFx: ImageSource,
+        // hitFx: ImageSource,
 
         // 它们是可选的，如果不提供就会使用那个chord叠加在未高亮的note上来产生高亮note
         holdHeadHl?: ImageSource, // HL: 高亮，与chord（多押）同义
@@ -70,13 +70,13 @@ export class Images {
         // // @ts-expect-error 只读是对外的
         // Images.FLICK = await createImageBitmap(await Images.loadNoteImage(flick));
         // @ts-expect-error 只读是对外的
-        Images.ANCHOR = await createImageBitmap(await Images.loadNoteImage(anchor));
+        Images.ANCHOR = await createImageBitmap(await Images.loadImage(anchor));
         // @ts-expect-error 只读是对外的
         Images.CHORD = await createImageBitmap(await Images.loadNoteImage(chord));
         // @ts-expect-error 只读是对外的
         Images.BELOW = await createImageBitmap(await Images.loadNoteImage(below));
-        // @ts-expect-error 只读是对外的
-        Images.HIT_FX = await createImageBitmap(await Images.loadImage(hitFx));
+        // // @ts-expect-error 只读是对外的
+        // Images.HIT_FX = await createImageBitmap(await Images.loadImage(hitFx));
 
         // // @ts-expect-error 只读是对外的
         // Images.TAP_HL = await createImageBitmap(tapHl ? Images.loadNoteImage(tapHl) : Images.generateHL(Images.TAP));
