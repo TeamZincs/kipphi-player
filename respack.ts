@@ -50,6 +50,9 @@ export class Respack {
 
     HIT_FX: CanvasDrawSource;
 
+    TAP_SE?: FileBearer;
+    FLICK_SE?: FileBearer;
+    DRAG_SE?: FileBearer;
 
     
     tintNotesMapping: Map<HEX, ProcessedTexture> = new Map();
@@ -137,6 +140,13 @@ export class Respack {
     //         ctx.drawImage()
     //     }
     // }
+    /**
+     * 从Phira资源包的结构加载资源包
+     * @param readFile 一个函数，接受一个路径，返回资源包内该路径的文件。（KPP本身不负责解压）
+     * 
+     * 在浏览器中，它应当返回一个Blob，而在Node中应当返回buffer。
+     * @returns 资源包对象
+     */
     static async loadFromPhira(readFile: (path: string) => Promise<FileBearer>) {
         const pack = new Respack();
 
@@ -170,12 +180,19 @@ export class Respack {
         pack.HOLD_BODY_HL = await pack.cropImage(hold_hl, 0, meta.holdAtlas[0], hold_hl.width, hold.height - meta.holdAtlas[1] - meta.holdAtlas[0]);
         pack.HOLD_HEAD_HL = await pack.cropImage(hold_hl, 0, hold.height - meta.holdAtlas[1], hold_hl.width, meta.holdAtlas[1]);
 
+        pack.TAP_SE = await readFile("click.ogg");
+        pack.FLICK_SE = await readFile("flick.ogg");
+        pack.DRAG_SE = await readFile("drag.ogg");
+
         pack.spawnHitDrawer();
         pack.spawnNoteDrawer();
         return pack;
     }
     // #default
     static async loadImage(blob: Blob) {
+        if (!blob) {
+            throw new Error("Blob is null or undefined");
+        }
         return await createImageBitmap(blob);
     }
     // #enddefault
