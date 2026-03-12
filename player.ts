@@ -306,6 +306,8 @@ export class Player extends EventTarget {
         context.save();
         const hitContext = this.hitContext;
         hitContext.clearRect(0, 0, 1350, 900);
+        // 虽然还要加个图片，但是如果不clear，在Node环境下，会泄漏很多内存
+        context.clearRect(-1350, -900, 2700, 1800);
         context.drawImage(this.background, -675, -450, 1350, 900);
         // 涂灰色（背景变暗）
         context.fillStyle = "#0008";
