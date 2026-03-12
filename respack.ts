@@ -212,9 +212,9 @@ export class Respack {
         // context.globalCompositeOperation = "multiply";
         // context.fillStyle = `#${tint.toString(16).padStart(8, "0")}`;
         // context.fillRect(0, 0, image.width, image.height);
+        // 这个canvas自己的multiply有问题，所以自己手动实现一个
         context.drawImage(image, 0, 0);
         const data = context.getImageData(0, 0, image.width, image.height);
-        console.log(data.data);
         for (let i = 0; i < data.data.length; i += 4) {
             data.data[i] = Math.round(data.data[i] * (tint >>> 16 & 0xff) / 255);
             data.data[i + 1] = Math.round(data.data[i + 1] * (tint >>> 8 & 0xff) / 255);
@@ -222,8 +222,6 @@ export class Respack {
             data.data[i + 3] = Math.round(data.data[i + 3] * (tint >>> 24) / 255);
             // 踩坑：要用>>>，防止tint被认为是三十二位负数
         }
-        
-        console.log(data.data, data.data.every((v, i) => i % 4 !== 3 || v === 0));
         context.putImageData(data, 0, 0);
         return await createImageBitmap(canvas);
     }
