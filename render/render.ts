@@ -1,6 +1,6 @@
-import fs from "fs/promises";
 
-import { Canvas, FontLibrary } from "skia-canvas";
+
+import { Canvas, FontLibrary, Window } from "skia-canvas";
 import { Demuxer, Decoder, Encoder } from "node-av/api";
 import { AVMEDIA_TYPE_AUDIO, AV_SAMPLE_FMT_FLTP, AV_CHANNEL_LAYOUT_STEREO, AV_CHANNEL_LAYOUT_MONO, FF_ENCODER_AAC } from "node-av/constants";
 import { Frame } from "node-av/lib";
@@ -11,7 +11,8 @@ import { Player } from "./player";
 import { Images } from "./image"
 import { Chart } from "kipphi";
 import { AudioProcessor } from "./audioProcessor";
-import type { Respack } from "./respack";
+import { Respack } from "./respack";
+import { readFile } from "fs/promises";
 
 
 
@@ -63,12 +64,12 @@ export async function renderChartFast(
     console.log("🔊 加载音效...");
     try {
         const loadPromises: Promise<void>[] = [];
-        loadPromises.push(audioProcessor.loadSoundEffect('tap', './assets/tap.mp3'));
-        loadPromises.push(audioProcessor.loadSoundEffect('hold', './assets/tap.mp3')); // hold 使用 tap 音效
-        loadPromises.push(audioProcessor.loadSoundEffect('flick', './assets/flick.mp3'));
-        loadPromises.push(audioProcessor.loadSoundEffect('drag', './assets/drag.mp3'));
+        loadPromises.push(audioProcessor.loadSoundEffect('tap', await readFile('./assets/tap.mp3')));
+        loadPromises.push(audioProcessor.loadSoundEffect('flick', await readFile('./assets/flick.mp3')));
+        loadPromises.push(audioProcessor.loadSoundEffect('drag', await readFile('./assets/drag.mp3')));
 
         await Promise.all(loadPromises);
+        audioProcessor.init();
         console.log(`✅ 音效加载完成`);
     } catch (err) {
         console.error(`⚠️  音效加载失败:`, err);
@@ -95,24 +96,33 @@ export async function renderChartFast(
         gopSize: fps * 2,
         threadCount: 1, // 单线程避免硬件编码器缓冲区问题
         options: {
+            r: `${fps}`,            // 帧率
             crf: '18',
             qp: '18',
+            bf: '0',              // 禁用B帧，确保解码顺序=显示顺序，避免画面抖动
             // 输出 Annex B 格式（MPEG-TS 需要的格式）
             h264_profile: 'high',
             h264_level: '41',
-            
         }
     });
 
-    // 创建 MP4 临时文件（MP4 格式需要可寻址）
-    const tempMp4Path = `./temp_output_${Date.now()}.mp4`;
-    console.log("📝 创建 MP4 muxer...");
+    // ========== 临时文件方案 ==========
+    const fs = await import('fs');
+    const path = await import('path');
+    const { execSync } = await import('child_process');
 
-    // 直接使用 MP4 格式封装（写入临时文件，支持 seek）
-    const mp4Muxer = await Muxer.open(tempMp4Path, {
-        format: "mp4",
-        maxMuxingQueueSize: 1024,  // 增加最大缓冲包数量（默认 128）
-        muxingQueueDataThreshold: 100 * 1024 * 1024  // 增加数据阈值到 100MB（默认 50MB）
+    const outputDir = path.join(process.cwd(), 'test_output');
+    if (!fs.existsSync(outputDir)) {
+        fs.mkdirSync(outputDir, { recursive: true });
+    }
+
+    // 使用固定的临时文件名（Node.js 单线程，无竞争）
+    const tempPath = path.join(outputDir, '.temp_output.mp4');
+    const finalPath = path.join(outputDir, 'output.mp4');
+
+    // 先写入临时文件（不使用 faststart）
+    const mp4Muxer = await Muxer.open(tempPath, {
+        format: "mp4"
     });
 
     // 添加视频流
@@ -151,17 +161,12 @@ export async function renderChartFast(
         }
     }
 
-    // 编码计数
-    let encodedFrameCount = 0;
-
     // 开始渲染流水线
     const startTime = performance.now();
 
     // 音频配置
     const targetSampleRate = 44100;
     const targetChannels = 2;
-    const samplesPerFrame = Math.ceil(targetSampleRate / fps);
-    const samplesPerFrameWithChannels = samplesPerFrame * targetChannels;
     
     // 创建累积音频缓冲区，用于在渲染时混合音效
     const totalAudioSamples = Math.ceil(duration * targetSampleRate) * targetChannels;
@@ -312,21 +317,40 @@ export async function renderChartFast(
         console.error('  ⚠️  警告：没有解码到任何音频数据！');
     }
 
-    // 使用 async function 生成帧
-    async function* generateFrames() {
-        for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
+    // ========== 同时编码视频和音频 ==========
+    console.log("🎬 开始同时编码视频和音频到 MP4...");
+
+    async function* generateMixedFrames() {
+        // 视频参数
+        const videoFrameCount = totalFrames;
+
+        // 音频参数
+        const blockSize = 1024;
+        const blockSizeWithChannels = blockSize * targetChannels;
+        const totalAudioBlocks = Math.ceil(mixedAudioBuffer.length / blockSizeWithChannels);
+
+        let videoFrameIndex = 0;
+        let audioBlockIndex = 0;
+        let audioCumulativeSamples = 0;
+
+        const startTime = performance.now();
+
+        // 交替产生视频帧和音频帧
+        while (videoFrameIndex < videoFrameCount || audioBlockIndex < totalAudioBlocks) {
+        // 生成视频帧
+        if (videoFrameIndex < videoFrameCount) {
+            const currentTime = left + videoFrameIndex / fps;
+            
             // 更新播放器状态
-            const currentTime = left + frameIndex / fps;
             player.audioCurrentTime = currentTime;
             player.render();
 
             // 在渲染时消费该时间点的音效条目
-            // 消费当前帧时间范围内的所有音效
             const frameStartTime = currentTime;
-            const frameEndTime = left + (frameIndex + 1) / fps;
+            const frameEndTime = left + (videoFrameIndex + 1) / fps;
             
             // 获取并消费该时间段内的音效
-            const soundEntries = audioProcessor.getSoundEffectsInTimeRange(frameStartTime, frameEndTime);
+            const soundEntries = audioProcessor.getSoundEffects();
             if (soundEntries.length > 0) {
                 // 计算该帧对应的音频采样范围
                 const startSample = Math.floor(frameStartTime * targetSampleRate) * targetChannels;
@@ -340,122 +364,77 @@ export async function renderChartFast(
                     const effectStartOffset = (entry.time - frameStartTime) * targetSampleRate * targetChannels;
                     const startSampleInFrame = startSample + Math.floor(effectStartOffset);
                     
-                    // 🔍 关键：sound.data 是平面格式（FLTP），需要正确转换为交错格式混合
                     const effectData = sound.data;
                     const effectChannels = sound.channels;
-                    
-                    // ✅ 计算每声道的样本数（不是总长度）
                     const effectSamplesPerChannel = Math.floor(effectData.length / effectChannels);
-                    
-                    // ✅ 计算可以混合的样本点数（基于交错格式的样本点数量）
                     const availableSamples = Math.floor((mixedAudioBuffer.length - startSampleInFrame) / targetChannels);
                     const samplesToMix = Math.min(effectSamplesPerChannel, availableSamples);
                     
-                    // ✅ 正确的平面→交错转换混合
                     for (let i = 0; i < samplesToMix; i++) {
                         for (let ch = 0; ch < targetChannels && ch < effectChannels; ch++) {
-                            // 目标位置：交错格式 [L0][R0][L1][R1]...
                             const destIndex = startSampleInFrame + i * targetChannels + ch;
-                            
-                            // 源位置：平面格式 [LLLL...][RRRR...]
                             const effectIndex = ch * effectSamplesPerChannel + i;
-                            
                             mixedAudioBuffer[destIndex] = mixedAudioBuffer[destIndex] + effectData[effectIndex];
                         }
                     }
                 }
-                // console.log(`  🎵 帧 ${frameIndex}: 混合 ${soundEntries.length} 个音效`);
             }
 
             // 获取原始 RGBA 数据（零拷贝引用）
             const rgbaBuffer = canvas.toBufferSync("raw");
 
-            // 创建 Frame
+            // 创建 Frame - 使用时间戳而不是帧索引
+            // 视频 PTS = (视频帧索引 * 音频采样率 / fps)
+            // 这样视频和音频使用相同的时间基准（1/44100）
+            const videoPTS = Math.floor(videoFrameIndex * targetSampleRate / fps);
             const frame = Frame.fromVideoBuffer(rgbaBuffer, {
                 format: AV_PIX_FMT_RGBA,
                 width,
                 height,
-                pts: BigInt(frameIndex),
-                timeBase: { num: 1, den: fps }
+                pts: BigInt(videoPTS),
+                timeBase: { num: 1, den: targetSampleRate }
             });
 
-            yield frame;
+            const progress = ((videoFrameIndex / videoFrameCount) * 100).toFixed(1);
+            const elapsed = (performance.now() - startTime) / 1000;
+            const fps_current = videoFrameIndex / elapsed;
 
-            encodedFrameCount++;
-
-            // 进度报告
-            if (frameIndex % 60 === 0) {
-                const progress = ((frameIndex / totalFrames) * 100).toFixed(1);
-                const elapsed = (performance.now() - startTime) / 1000;
-                const fps_current = frameIndex / elapsed;
-                console.log(`📊 进度：${progress}% | 已编码：${encodedFrameCount} | 速度：${fps_current.toFixed(1)} fps`);
+            if (videoFrameIndex % 60 === 0) {
+                console.log(`📊 进度：${progress}% | 已编码：${videoFrameIndex} | 速度：${fps_current.toFixed(1)} fps`);
             }
+
+            yield { type: 'video', frame };
+            videoFrameIndex++;
         }
 
-        // 发送 null 触发编码器刷新
-        yield null;
-    }
+            // 生成音频帧（每次产生 2 个音频块以匹配视频节奏）
+            // 音频块每块 1024 采样点，约 23.2ms，视频每帧 16.67ms
+            // 每个视频帧对应约 1.4 个音频块，所以每 5 个视频帧产生 7 个音频块
+            const audioBlocksPerVideo = 7 / 5;
+            const audioBlocksToGenerate = Math.floor(audioBlocksPerVideo);
 
-    // 先处理视频编码（串行）
-    console.log("🎬 开始编码视频...");
-    try {
-        for await (const packet of encoder.packets(generateFrames())) {
-            if (packet === null) {
-                break;
-            }
-            await using p = packet;
-            await mp4Muxer.writePacket(p, videoStreamIndex);
-        }
-    } catch (err) {
-        console.error('视频编码过程中出错:', err);
-        throw err;
-    }
-    encoder.close();
-    console.log("✅ 视频编码完成");
-
-    // 处理音频转码（串行）
-    console.log("🎵 开始处理音频...");
-    try {
-        let encodedPacketCount = 0;
-
-        if (audioEncoder && bgmSampleOffset > 0) {
-            console.log(`🎵 编码器状态：${audioEncoder ? '✅' : '❌'}, BGM 数据：${bgmSampleOffset} 采样点`);
-
-            // 使用已混合的音频缓冲区（包含 BGM+音效）
-            console.log("🎬 编码混合音频...");
-            const blockSize = 1024;
-            const blockSizeWithChannels = blockSize * targetChannels;
-            const totalBlocks = Math.ceil(mixedAudioBuffer.length / blockSizeWithChannels);
-            let audioFrameIndex = 0;
-            let cumulativeSamples = 0;  // 累积采样数，用于计算正确的 PTS
-
-            for (let blockIndex = 0; blockIndex < totalBlocks; blockIndex++) {
-                const start = blockIndex * blockSizeWithChannels;
+            for (let i = 0; i < audioBlocksToGenerate && audioBlockIndex < totalAudioBlocks; i++) {
+                const start = audioBlockIndex * blockSizeWithChannels;
                 const end = Math.min(start + blockSizeWithChannels, mixedAudioBuffer.length);
                 const chunk = mixedAudioBuffer.subarray(start, end);
 
                 const actualSamples = Math.ceil(chunk.length / targetChannels);
 
-                // 计算正确的 PTS：基于实际时间和视频帧率同步
-                // 音频的时间基准设为 targetSampleRate，PTS 表示从开始的采样数
-                const pts = BigInt(cumulativeSamples);  // PTS = 从开始的采样数
-                cumulativeSamples += actualSamples;      // 累加实际采样数
+                const pts = BigInt(audioCumulativeSamples);
+                audioCumulativeSamples += actualSamples;
 
-                // AAC 编码器需要 FLTP（平面格式），需要将交错数据转换为平面格式
                 const channelBuffers = [];
                 for (let ch = 0; ch < targetChannels; ch++) {
                     const channelData = new Float32Array(actualSamples);
-                    for (let i = 0; i < actualSamples; i++) {
-                        channelData[i] = chunk[i * targetChannels + ch];
+                    for (let j = 0; j < actualSamples; j++) {
+                        channelData[j] = chunk[j * targetChannels + ch];
                     }
                     channelBuffers.push(channelData);
                 }
 
-                // 对于 FLTP 格式，需要创建一个包含所有声道数据的单一 Buffer
-                // 每个声道的数据连续存放
                 const totalBytes = channelBuffers.reduce((sum, buf) => sum + buf.byteLength, 0);
                 const combinedBuffer = Buffer.alloc(totalBytes);
-                
+
                 let offset = 0;
                 for (let ch = 0; ch < targetChannels; ch++) {
                     const channelBytes = channelBuffers[ch].byteLength;
@@ -466,74 +445,106 @@ export async function renderChartFast(
                     offset += channelBytes;
                 }
 
-                // 创建平面格式的音频帧
-                await using frame = Frame.fromAudioBuffer(
+                const audioFrame = Frame.fromAudioBuffer(
                     combinedBuffer,
                     {
                         nbSamples: actualSamples,
-                        format: AV_SAMPLE_FMT_FLTP,  // FLTP = 平面浮点格式（AAC 编码器要求）
+                        format: AV_SAMPLE_FMT_FLTP,
                         sampleRate: targetSampleRate,
                         channelLayout: targetChannels === 2 ? AV_CHANNEL_LAYOUT_STEREO : AV_CHANNEL_LAYOUT_MONO,
                         pts: pts,
-                        timeBase: { num: 1, den: targetSampleRate }  // 音频使用采样率作为时间基准
+                        timeBase: { num: 1, den: targetSampleRate }
                     }
                 );
 
-                for await (const outPacket of audioEncoder.packets(frame)) {
-                    if (outPacket === null) continue;
-                    await using p = outPacket;
-                    await mp4Muxer.writePacket(p, audioStreamIndex);
-                    encodedPacketCount++;
-                }
-
-                audioFrameIndex++;
-
-                if (audioFrameIndex % 100 === 0) {
-                    console.log(`  📊 音频编码进度：${audioFrameIndex} 帧`);
-                }
-            }
-
-            // 刷新音频编码器
-            console.log(`🎵 刷新音频编码器...`);
-            for await (const outPacket of audioEncoder.packets(null)) {
-                if (outPacket === null) continue;
-                await using p = outPacket;
-                await mp4Muxer.writePacket(p, audioStreamIndex);
-                encodedPacketCount++;
-            }
-
-            console.log(`✅ 音频处理完成：${audioFrameIndex} 帧，${encodedPacketCount} 包`);
-        } else {
-            // 无法转码，跳过音频
-            console.log(`⚠️  跳过音频（编码器不可用或没有 BGM 数据）`);
-            if (!audioEncoder) {
-                console.log('  原因：audioEncoder 为 null');
-            }
-            if (bgmSampleOffset === 0) {
-                console.log('  原因：bgmSampleOffset = 0 (没有解码到 BGM 数据)');
+                yield { type: 'audio', frame: audioFrame };
+                audioBlockIndex++;
             }
         }
 
-        // 清理资源
-        if (audioDecoder) audioDecoder.close();
-        if (audioEncoder) audioEncoder.close();
+        // 发送 EOF
+        yield { type: 'video', frame: null };
+        yield { type: 'audio', frame: null };
+    }
+
+    let encodedPacketCount = 0;
+
+    try {
+        for await (const item of generateMixedFrames()) {
+            if (item.type === 'video') {
+                for await (const packet of encoder.packets(item.frame)) {
+                    if (packet === null) break;
+                    await using p = packet;
+                    await mp4Muxer.writePacket(p, videoStreamIndex);
+                    encodedPacketCount++;
+                }
+            } else {
+                if (audioEncoder && item.frame !== null) {
+                    for await (const packet of audioEncoder.packets(item.frame)) {
+                        if (packet === null) continue;
+                        await using p = packet;
+                        await mp4Muxer.writePacket(p, audioStreamIndex);
+                        encodedPacketCount++;
+                    }
+                }
+            }
+        }
+
+        // 刷新编码器
+        console.log("🔄 刷新视频编码器...");
+        for await (const packet of encoder.packets(null)) {
+            if (packet === null) break;
+            await using p = packet;
+            await mp4Muxer.writePacket(p, videoStreamIndex);
+        }
+
+        if (audioEncoder) {
+            console.log("🔄 刷新音频编码器...");
+            for await (const packet of audioEncoder.packets(null)) {
+                if (packet === null) continue;
+                await using p = packet;
+                await mp4Muxer.writePacket(p, audioStreamIndex);
+            }
+        }
+
+        console.log(`✅ 编码完成，共 ${encodedPacketCount} 个包`);
     } catch (err) {
-        console.error('⚠️  音频处理失败:', err);
-        if (audioDecoder) audioDecoder.close();
-        if (audioEncoder) audioEncoder.close();
+        console.error('编码过程中出错:', err);
         throw err;
     }
-    
-    // 关闭 mp4 muxer
-    console.log("📝 封装 MP4...");
+
+    encoder.close();
+    if (audioEncoder) audioEncoder.close();
+
+    // ========== 关闭 MP4 Muxer ==========
+    console.log("📝 完成 MP4 封装...");
     await mp4Muxer.close();
 
-    // 读取生成的 MP4 文件
-    const mp4Buffer = await Bun.file(tempMp4Path).arrayBuffer();
-    console.log(`✅ MP4 生成完成：${(mp4Buffer.byteLength / 1024 / 1024).toFixed(2)} MB`);
+    // ========== 使用 FFmpeg 处理 faststart ==========
+    console.log("🔄 使用 FFmpeg 处理 faststart (移动 moov atom 到开头)...");
+    try {
+        execSync(`ffmpeg -y -i "${tempPath}" -c copy -movflags faststart "${finalPath}"`, { stdio: 'inherit' });
+        console.log(`✅ faststart 处理完成`);
+    } catch (err) {
+        console.error(`⚠️  FFmpeg faststart 处理失败，使用原始文件:`, err);
+        // 如果 FFmpeg 处理失败，直接重命名临时文件
+        if (fs.existsSync(tempPath)) {
+            fs.renameSync(tempPath, finalPath);
+        }
+    }
 
-    // 不再删除临时文件，避免文件占用问题
-    console.log(`📁 临时文件保留：${tempMp4Path}`);
+    // 清理临时文件
+    if (fs.existsSync(tempPath)) {
+        try {
+            fs.unlinkSync(tempPath);
+        } catch (e) {
+            // 忽略清理错误
+        }
+    }
+
+    // 读取最终文件到内存
+    const mp4Buffer = fs.readFileSync(finalPath);
+    console.log(`💾 最终输出: ${finalPath} (${(mp4Buffer.byteLength / 1024 / 1024).toFixed(2)} MB)`);
 
     const totalTime = (performance.now() - startTime) / 1000;
     console.log(`✅ 渲染完成！总耗时：${totalTime.toFixed(2)}s | 平均：${(totalFrames/totalTime).toFixed(1)} fps`);
@@ -545,3 +556,53 @@ export async function renderChartFast(
         fps: totalFrames / totalTime
     };
 }
+
+export async function dryRunRender(
+    chart: Chart,
+    illustrationBlobOrBuffer: Blob | Buffer,
+    textureFetcher: (name: string) => Promise<Buffer>,
+    audioBuffer: Buffer,
+    range?: [number, number]
+) {
+    const canvas = new Canvas(1350, 900);
+    
+    // 初始化音频处理器
+    const audioProcessor = new AudioProcessor();
+
+    // 加载音效（tap 和 hold 使用同一音效）
+    console.log("🔊 加载音效...");
+    try {
+        const loadPromises: Promise<void>[] = [];
+        loadPromises.push(audioProcessor.loadSoundEffect('tap', await readFile('./assets/tap.mp3')));
+        loadPromises.push(audioProcessor.loadSoundEffect('flick', await readFile('./assets/flick.mp3')));
+        loadPromises.push(audioProcessor.loadSoundEffect('drag', await readFile('./assets/drag.mp3')));
+
+        await Promise.all(loadPromises);
+        audioProcessor.init();
+        console.log(`✅ 音效加载完成`);
+    } catch (err) {
+        console.error(`⚠️  音效加载失败:`, err);
+    }
+    const player = new Player(canvas, audioProcessor, await Respack.loadImage(illustrationBlobOrBuffer as Buffer),
+        respack);
+    audioProcessor.linkPlayer(player);
+    player.receive(chart, async (str) => await Respack.loadImage(await textureFetcher(str)));
+    const fps = 60;
+    const frames = Math.ceil(fps * (range ? range[1] : chart.duration));
+    const firstFrame = fps * (range ? range[0] : 0);
+    const delta = frames - firstFrame;
+    let lastTime = performance.now();
+    const startTime = performance.now();
+    console.log("starting dry run", firstFrame, frames)
+    for (let i = firstFrame; i < frames; i++) {
+        player.audioCurrentTime = i / fps;
+        player.render();
+        if (i % 100 === 99) {
+            console.log(`Progress: ${Math.round(i / delta * 100)}%, Rendering speed: ${(100 / ((performance.now() - lastTime) / 1000)).toFixed(1)} fps`);
+            console.log("Memory usage:", process.memoryUsage())
+            lastTime = performance.now();
+        }
+    }
+    console.log("dry run finished, total time:", (performance.now() - startTime) / 1000, "s")
+}
+

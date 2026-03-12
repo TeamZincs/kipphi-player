@@ -90,7 +90,6 @@ export class Player extends EventTarget {
     lastUncountedNNN: NNNOrTail | null = null;
     lastUncountedTailNNN: NNNOrTail | null = null;
     lastCountedBeats: number = 0;
-
     showsInfo = true;
     showsLineID = false;
     showsRenderingBaseline = false;
@@ -263,9 +262,11 @@ audioCurrentTime: number = 0;
         context.save();
         const hitContext = this.hitContext;
         hitContext.clearRect(0, 0, 1350, 900);
+        // 虽然还要加个图片，但是如果不clear，在Node环境下，会泄漏很多内存
+        context.clearRect(-1350, -900, 2700, 1800);
         context.drawImage(this.background, -675, -450, 1350, 900);
         // 涂灰色（背景变暗）
-        context.fillStyle = "#222c";
+        context.fillStyle = "#0008";
         context.fillRect(-27000, -18000, 54000, 36000)
         // 画出渲染范围圆
         context.strokeStyle = "#66ccff";
@@ -359,8 +360,8 @@ audioCurrentTime: number = 0;
         context.resetTransform();
         context.textAlign = "center";
         context.font = "20px phigros";
-        context.fillText(this.time.toFixed(2) + " " + renderingBeats.toFixed(2), 675, 900)
-
+        context.fillStyle = "#ddd";
+        
         this.dispatchEvent(new Event("drawn"));
 
         // this.soundQueue = [];

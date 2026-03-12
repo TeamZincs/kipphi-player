@@ -1,17 +1,28 @@
-import { type NoteType } from "kipphi";
+import { NoteType } from "kipphi";
 import { Demuxer, Decoder } from "node-av/api";
 import { AVMEDIA_TYPE_AUDIO } from "node-av/constants";
 import type { Player } from "./player";
 
 interface SoundEntry { time: number, type: number }
 
+const SOUND_QUEUE_SIZE = 4096;
+
 /**
  * 音频处理器 - 用于缓存音效
  */
 export class AudioProcessor {
     private player: Player;
-    private soundEffects: Map<string, AudioBuffer> = new Map();
-    private soundQueue: Array<SoundEntry> = [];
+    private soundEffects: AudioBuffer[] = new Array(5);
+    private soundQueue: Array<SoundEntry> = new Array(SOUND_QUEUE_SIZE); // 定长数组，用完从头又开始用
+    private soundQueueIndex = 0;
+    private MAX_SOUND_DURATION = 0; 
+
+    init() {
+        this.soundEffects[NoteType.hold] = this.soundEffects[NoteType.tap];
+        const durations = this.soundEffects.filter(e => e).map(e => e ? e.duration : 0)
+        this.MAX_SOUND_DURATION = Math.max(...durations);
+        console.log(this.MAX_SOUND_DURATION, durations)
+    }
 
     /**
      * 初始化音频处理器
@@ -21,15 +32,15 @@ export class AudioProcessor {
         this.player = player;
     }
 
+
     /**
      * 加载音效文件
      * @param name 音效名称
      * @param filePath 音效文件路径
      * @returns AudioBuffer 格式的音效数据
      */
-    async loadSoundEffect(name: string, filePath: string): Promise<void> {
+    async loadSoundEffect(name: string, fileBuffer: Buffer): Promise<void> {
         // 读取文件
-        const fileBuffer = Buffer.from(await Bun.file(filePath).arrayBuffer());
 
         // 解封装
         const demuxer = await Demuxer.open(fileBuffer);
@@ -49,7 +60,7 @@ export class AudioProcessor {
         }
 
         if (audioStreamIndex === -1) {
-            throw new Error(`未找到音频流: ${filePath}`);
+            throw new Error(`未找到音频流: ${name}`);
         }
 
         console.log(`  📂 加载音效 ${name}: ${audioSampleRate}Hz, ${audioChannels}ch`);
@@ -104,23 +115,21 @@ export class AudioProcessor {
         demuxer.close();
 
         // 缓存音效
-        this.soundEffects.set(name, {
+        this.soundEffects[NoteType[name]] = {
             data: buffer,
             sampleRate: audioSampleRate,
             channels: audioChannels,
             length: buffer.length / audioChannels,
             duration: buffer.length / audioChannels / audioSampleRate
-        });
+        };
     }
 
     /**
      * 获取缓存的音效
      * @param type 音符类型 (1=tap, 2=hold, 3=flick, 4=drag)
      */
-    getSoundEffect(type: number): AudioBuffer | null {
-        const names = ['tap', 'hold', 'flick', 'drag'];
-        const name = names[type - 1];
-        return this.soundEffects.get(name) || null;
+    getSoundEffect(type: NoteType): AudioBuffer | null {
+        return this.soundEffects[type] || null;
     }
 
     /**
@@ -129,39 +138,32 @@ export class AudioProcessor {
      * @param type 音符类型
      */
     playNoteSound(type: NoteType) {
-        this.soundQueue.push({ time: this.player.audioCurrentTime, type });
+        this.soundQueue[this.soundQueueIndex++] = { time: this.player.audioCurrentTime, type }
+        this.soundQueueIndex %= SOUND_QUEUE_SIZE;
     }
 
     /**
-     * 获取指定时间范围内的音效条目并消费它们
-     * @param startTime 开始时间（秒）
-     * @param endTime 结束时间（秒）
-     * @returns 该时间范围内的音效条目列表
+     * 
      */
-    getSoundEffectsInTimeRange(startTime: number, endTime: number): SoundEntry[] {
-        const entries = this.soundQueue.filter(
-            entry => entry.time >= startTime && entry.time < endTime
-        );
-        // 消费掉这些条目，从队列中移除
-        this.soundQueue = this.soundQueue.filter(
-            entry => entry.time < startTime || entry.time >= endTime
-        );
+    getSoundEffects(): SoundEntry[] {
+        // 从当前位置开始向前（索引减小方向）遍历队列数组，过期条目不管，遇到直接结束
+        const expiry = this.player.audioCurrentTime - this.MAX_SOUND_DURATION;
+        const entries: SoundEntry[] = [];
+        let index = this.soundQueueIndex;
+        while (true) {
+            index--;
+            if (index < 0) {
+                index = SOUND_QUEUE_SIZE - 1;
+            }
+            const entry = this.soundQueue[index];
+            if (!entry || entry.time < expiry) {
+                break;
+            }
+            entries.push(entry);
+        }
         return entries;
     }
 
-    /**
-     * 获取音效队列（用于渲染后处理）
-     */
-    getSoundQueue(): Array<{ time: number, type: number }> {
-        return [...this.soundQueue];
-    }
-
-    /**
-     * 清空音效队列
-     */
-    clearSoundQueue() {
-        this.soundQueue = [];
-    }
 }
 
 /**
