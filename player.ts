@@ -67,6 +67,7 @@ type HEX = number;
 
 // #default
 type ProcessedTexture = OffscreenCanvas | ImageBitmap;
+const __IS_BROWSER = true;
 // #enddefault
 /*
 #node {
@@ -77,6 +78,7 @@ type HTMLImageElement = Image;
 type ProcessedTexture = Canvas;
 const OffscreenCanvas = Canvas;
 type OffscreenCanvasRenderingContext2D = CanvasRenderingContext2D;
+const __IS_BROWSER = false;
 }
 */
 
@@ -120,6 +122,14 @@ export class Player extends EventTarget {
      * 为渲染部分采用不同的偏移值（比如蓝牙耳机延迟高，容易音画不同步）
      */
     renderingOffset = 0;
+    /**
+     * 若设为真，则打击特效产生后会留在原地，而不是跟着判定线移动。
+     * 
+     * 这是本家标准行为，但是如果追求性能，可以设为false。
+     * 
+     * 在浏览器端，这个值默认就是false。
+     */
+    hitEffectNoFollows = !__IS_BROWSER;
 
     
     textureMapping: Map<string, ImageBitmap> = new Map();
@@ -419,7 +429,7 @@ export class Player extends EventTarget {
         context.fillText(this.lastMeasuredFPSStr, 20, 20);
         context.fillText(this.time.toFixed(2) + " " + renderingBeats.toFixed(2), 675, 900)
         // #enddefault
-        
+
         this.dispatchEvent(new Event("drawn"));
 
         // this.soundQueue = [];
@@ -454,6 +464,31 @@ export class Player extends EventTarget {
             for (let line of judgeLine.children) {
                 this.precalculate(myMatrix, line, beats);
             }
+        }
+    }
+    /**
+     * 计算判定线在某时刻的矩阵。特别适用于过去时。
+     * 
+     * 在当前代码，这个方法仅用在开启打击特效滞留时。
+     * 
+     * （KPP尽可能遵守“无状态渲染”，不会缓存打击特效在之前的位置。）
+     * @param judgeLine 
+     * @param beats 
+     */
+    calculateLineMatrix(judgeLine: JudgeLine, beats: number) {
+        const x = judgeLine.getStackedValue("moveX", beats);
+        const y = judgeLine.getStackedValue("moveY", beats);
+        const theta = judgeLine.getStackedValue("rotate", beats) * Math.PI / 180;
+        const parent = judgeLine.father;
+        if (!parent) {
+            return identity.translate(x + 675, -y + 450).rotate(-theta).scale(1, -1);
+        } else if (!judgeLine.rotatesWithFather) {
+            const parentMatrix = this.calculateLineMatrix(parent, beats);
+            return parentMatrix.translate(x, y).rotate(-theta);
+        } else {
+            const parentMatrix = this.calculateLineMatrix(parent, beats);
+            const {x: tx, y: ty} = new Coordinate(x, y).mul(parentMatrix);
+            return identity.translate(tx, ty).rotate(-theta);
         }
     }
     renderLine(judgeLine: JudgeLine, beats: number) {
@@ -701,7 +736,8 @@ export class Player extends EventTarget {
     }
     renderHitEffects(matrix: Matrix33, tree: NNList, startBeats: number, endBeats: number, timeCalculator: TimeCalculator) {
         let noteNode = tree.getNodeAt(startBeats, true);
-        const { hitContext, respack, renderingTime } = this;
+        const { hitContext, respack, renderingTime, hitEffectNoFollows } = this;
+        const line = tree.parentLine
         // console.log(hitContext.getTransform())
         const end = tree.getNodeAt(endBeats);
         if (noteNode.type === NodeType.TAIL) {
@@ -718,7 +754,7 @@ export class Player extends EventTarget {
                 }
                 const posX = note.positionX;
                 const yo = note.yOffset * (note.above ? 1 : -1);
-                const {x, y} = new Coordinate(posX, yo).mul(matrix);
+                const {x, y} = new Coordinate(posX, yo).mul(hitEffectNoFollows ? this.calculateLineMatrix(line, beats) : matrix);
                 // console.log("he", x, y);
                 const he = note.tintHitEffects;
                 respack.hitDrawer(hitContext, x, y, HIT_EFFECT_SIZE, renderingTime - timeCalculator.toSeconds(beats), he)
@@ -739,7 +775,8 @@ export class Player extends EventTarget {
      */
     renderHoldHitEffects(matrix: Matrix33, tree: HNList, beats: number, startBeats: number, endBeats: number, timeCalculator: TimeCalculator) {
         const start = tree.getNodeAt(startBeats, true);
-        const { hitContext, respack, renderingTime } = this;
+        const { hitContext, respack, renderingTime, hitEffectNoFollows } = this;
+        const line = tree.parentLine
         let noteNode = start;
         const end = tree.getNodeAt(endBeats);
         if (noteNode.type === NodeType.TAIL) {
@@ -760,9 +797,10 @@ export class Player extends EventTarget {
                 }
                 const posX = note.positionX;
                 const yo = note.yOffset * (note.above ? 1 : -1);
-                const {x, y} = new Coordinate(posX, yo).mul(matrix);
+                const intBeats = Math.floor(beats);
+                const {x, y} = new Coordinate(posX, yo).mul(hitEffectNoFollows ? this.calculateLineMatrix(line, intBeats) : matrix);
                 const tintHE = note.tintHitEffects;
-                respack.hitDrawer(hitContext, x, y, HIT_EFFECT_SIZE, renderingTime - timeCalculator.toSeconds(Math.floor(beats)), tintHE)
+                respack.hitDrawer(hitContext, x, y, HIT_EFFECT_SIZE, renderingTime - timeCalculator.toSeconds(intBeats), tintHE)
             }
             noteNode = <NoteNode>noteNode.next
         }
