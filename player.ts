@@ -106,6 +106,9 @@ export class Player extends EventTarget {
     lastUncountedNNN: NNNOrTail | null = null;
     lastUncountedTailNNN: NNNOrTail | null = null;
     lastCountedBeats: number = 0;
+    lastRenderingRealTime: number = 0;
+    renderedFrames: number = 0;
+    lastMeasuredFPSStr: string = "N/A";
 
     showsInfo = true;
     showsLineID = false;
@@ -404,6 +407,14 @@ export class Player extends EventTarget {
         context.resetTransform();
         context.textAlign = "center";
         context.font = "20px phigros";
+        context.fillStyle = "#ddd";
+        const now = performance.now();
+        if (++this.renderedFrames >= 40) {
+            this.renderedFrames = 0;
+            this.lastMeasuredFPSStr = (40000 / (now - this.lastRenderingRealTime)).toFixed(1);
+            this.lastRenderingRealTime = now;
+        }
+        context.fillText(this.lastMeasuredFPSStr, 20, 20);
         context.fillText(this.time.toFixed(2) + " " + renderingBeats.toFixed(2), 675, 900)
 
         this.dispatchEvent(new Event("drawn"));
