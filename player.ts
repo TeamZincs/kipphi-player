@@ -426,7 +426,7 @@ export class Player extends EventTarget {
             this.lastMeasuredFPSStr = (40000 / (now - this.lastRenderingRealTime)).toFixed(1);
             this.lastRenderingRealTime = now;
         }
-        context.fillText(this.lastMeasuredFPSStr, 20, 20);
+        context.fillText(this.lastMeasuredFPSStr, 30, 20);
         context.fillText(this.time.toFixed(2) + " " + renderingBeats.toFixed(2), 675, 900)
         // #enddefault
 
