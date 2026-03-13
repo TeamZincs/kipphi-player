@@ -792,15 +792,19 @@ export class Player extends EventTarget {
                 if (note.isFake) {
                     continue;
                 }
+                // 这里最后的几个打击特效可能不能渲染完整，但这个小瑕疵可以接受
                 if (startBeats > TC.toBeats(note.endTime)) {
                     continue;
                 }
                 const posX = note.positionX;
                 const yo = note.yOffset * (note.above ? 1 : -1);
-                const intBeats = Math.floor(beats);
-                const {x, y} = new Coordinate(posX, yo).mul(hitEffectNoFollows ? this.calculateLineMatrix(line, intBeats) : matrix);
-                const tintHE = note.tintHitEffects;
-                respack.hitDrawer(hitContext, x, y, HIT_EFFECT_SIZE, renderingTime - timeCalculator.toSeconds(intBeats), tintHE)
+                let intBeats = Math.floor(beats);
+                while (intBeats > startBeats) {
+                    const {x, y} = new Coordinate(posX, yo).mul(hitEffectNoFollows ? this.calculateLineMatrix(line, intBeats) : matrix);
+                    const tintHE = note.tintHitEffects;
+                    respack.hitDrawer(hitContext, x, y, HIT_EFFECT_SIZE, renderingTime - timeCalculator.toSeconds(intBeats), tintHE);
+                    intBeats--;
+                }
             }
             noteNode = <NoteNode>noteNode.next
         }
