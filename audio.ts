@@ -15,11 +15,12 @@ export class AudioProcessor {
     }
     static fromRespack(respack: Respack) {
         const instance = new AudioProcessor();
-        return instance.init({
+        instance.init({
             tap: respack.TAP_SE,
             drag: respack.DRAG_SE,
             flick: respack.FLICK_SE
         });
+        return instance;
     }
     async init({ tap, drag, flick }: {tap: string | Blob, drag: string | Blob, flick: string | Blob}) {
         this.tap = await this.loadAudioBuffer(tap);
