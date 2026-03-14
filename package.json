@@ -1,22 +1,13 @@
 {
   "name": "kipphi-player",
-  "description": "",
-  "version": "2.0.0",
+  "description": "A Phigros Chart Player, designed with the philosophy of stateless-rendering. Very friendly for editors since it's high-performance.",
+  "version": "2.1.0",
   "author": "Team Zincs (https://github.com/TeamZincs)",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/TeamZincs/kipphi-player.git"
   },
-  "files": [
-    "index.ts",
-    "audio.ts",
-    "image.ts",
-    "matrix.ts",
-    "player.ts",
-    "util.ts",
-    "LICENSE"
-  ],
   "module": "index.js",
   "main": "index.js",
   "type": "module",
@@ -27,7 +18,7 @@
     "typescript": "^5"
   },
   "dependencies": {
-    "kipphi": "^2.0.1",
+    "kipphi": "^2.1.0",
     "yaml": "^2.8.2"
   },
   "scripts": {

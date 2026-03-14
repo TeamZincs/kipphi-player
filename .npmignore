@@ -38,3 +38,9 @@ test
 .gitignore
 .npmignore
 render
+
+.vscode
+build
+bun.lock
+*.code-workspace
+
