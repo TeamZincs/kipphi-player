@@ -479,16 +479,16 @@ export class Player extends EventTarget {
         const x = judgeLine.getStackedValue("moveX", beats);
         const y = judgeLine.getStackedValue("moveY", beats);
         const theta = judgeLine.getStackedValue("rotate", beats) * Math.PI / 180;
-        const parent = judgeLine.father;
-        if (!parent) {
+        const father = judgeLine.father;
+        if (!father) {
             return identity.translate(x + 675, -y + 450).rotate(-theta).scale(1, -1);
-        } else if (!judgeLine.rotatesWithFather) {
-            const parentMatrix = this.calculateLineMatrix(parent, beats);
+        } else if (judgeLine.rotatesWithFather) {
+            const parentMatrix = this.calculateLineMatrix(father, beats);
             return parentMatrix.translate(x, y).rotate(-theta);
         } else {
-            const parentMatrix = this.calculateLineMatrix(parent, beats);
+            const parentMatrix = this.calculateLineMatrix(father, beats);
             const {x: tx, y: ty} = new Coordinate(x, y).mul(parentMatrix);
-            return identity.translate(tx, ty).rotate(-theta);
+            return identity.translate(tx, ty).rotate(-theta).scale(1, -1);
         }
     }
     renderLine(judgeLine: JudgeLine, beats: number) {
