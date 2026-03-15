@@ -571,19 +571,24 @@ export class Player extends EventTarget {
         // 法向量是单位向量，分母是1，不写
         /** the distance between the center and the line */
         const innerProd = innerProduct(toCenter, nVector);
+        // 法向量朝向判定线正面
+        // 现在法向量和内积的结果：如果正面对着中心点，内积为正，反之为负
+        // 因此，innerProd的正负是重要的。如果offset为负，note在更低的地方被判定，“实际判定线”距离圆心更远
+        // 所以distance要变大。因此，是innerProd - offset的绝对值。
+        // （这是KPA家族代码中不可逾越的一座史山）
         const judgeLineCover = judgeLine.cover;
         const getYs = judgeLineCover ? (offset: number) => {
             
-            const distance: number = Math.abs(innerProd + offset);
-            let startY = distance - RENDER_SCOPE + offset;
-            const endY = distance + RENDER_SCOPE + offset;
+            const distance: number = Math.abs(innerProd - offset);
+            let startY = distance - RENDER_SCOPE;
+            const endY = distance + RENDER_SCOPE;
             if (startY < 0) startY = 0;
             return [startY, endY]
         } : (offset: number) => {
             
-            const distance: number = Math.abs(innerProd + offset);
-            const startY = distance - RENDER_SCOPE + offset; // 显示线下音符
-            const endY = distance + RENDER_SCOPE + offset;
+            const distance: number = Math.abs(innerProd - offset);
+            const startY = distance - RENDER_SCOPE; // 显示线下音符
+            const endY = distance + RENDER_SCOPE;
             return [startY, endY]
         }
         
@@ -779,6 +784,7 @@ export class Player extends EventTarget {
         const line = tree.parentLine
         let noteNode = start;
         const end = tree.getNodeAt(endBeats);
+        const hitEffectDuration = respack.hitFxDuration;
         if (noteNode.type === NodeType.TAIL) {
             return;
         }
@@ -792,8 +798,13 @@ export class Player extends EventTarget {
                 if (note.isFake) {
                     continue;
                 }
-                // 这里最后的几个打击特效可能不能渲染完整，但这个小瑕疵可以接受
-                if (startBeats > TC.toBeats(note.endTime)) {
+                if (hitEffectNoFollows) {
+                    const timeSecs = timeCalculator.toSeconds(beats);
+                    const endTimeSecs = timeCalculator.toSeconds(TC.toBeats(note.endTime));
+                    if (timeSecs > endTimeSecs + hitEffectDuration) {
+                        continue;
+                    }
+                } else if (startBeats > TC.toBeats(note.endTime)) {
                     continue;
                 }
                 const posX = note.positionX;
