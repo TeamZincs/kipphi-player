@@ -622,7 +622,7 @@ export class Player extends EventTarget {
         for (let trees of [holdTrees, noteTrees]) {
             for (const [_, list] of trees) {
                 const speedVal: number = list.speed;
-                if (DRAWS_NOTES) {
+                if (DRAWS_NOTES && alpha >= 0) {
                     // debugger
                     // 渲染音符
                     // console.time("computeTimeRange")
