@@ -20,15 +20,6 @@ const CELL_SIZE = 256;
 
 type ImageSource = Blob | string| Buffer;
 export class Images {
-    // static readonly TAP: ImageBitmap
-    // static readonly TAP_HL: ImageBitmap
-    // static readonly HOLD_BODY: ImageBitmap
-    // static readonly HOLD_HEAD: ImageBitmap
-    // static readonly HOLD_HEAD_HL: ImageBitmap
-    // static readonly DRAG: ImageBitmap
-    // static readonly DRAG_HL: ImageBitmap
-    // static readonly FLICK: ImageBitmap
-    // static readonly FLICK_HL: ImageBitmap
     static readonly ANCHOR: ImageBitmap
     /** 多押 */
     static readonly CHORD: ImageBitmap
@@ -36,57 +27,15 @@ export class Images {
     // static readonly HIT_FX: ImageBitmap
 
     static async loadAndOptimize({
-        // tap, holdBody, holdHead, drag, flick,
-        anchor, chord, below, //hitFx,
-        // holdHeadHl,
-        // tapHl,
-        // dragHl,
-        // flickHl,
+        anchor, below
     }: {
-        // tap: ImageSource,
-        // holdBody: ImageSource,
-        // holdHead: ImageSource,
-        // drag: ImageSource,
-        // flick: ImageSource,
         anchor: ImageSource,
-        chord: ImageSource,
         below: ImageSource,
-        // hitFx: ImageSource,
-
-        // 它们是可选的，如果不提供就会使用那个chord叠加在未高亮的note上来产生高亮note
-        holdHeadHl?: ImageSource, // HL: 高亮，与chord（多押）同义
-        tapHl?: ImageSource,
-        dragHl?: ImageSource,
-        flickHl?: ImageSource,
     }) {
-        // // @ts-expect-error 只读是对外的
-        // Images.TAP = await createImageBitmap(await Images.loadNoteImage(tap));
-        // // @ts-expect-error 只读是对外的
-        // Images.HOLD_BODY = await createImageBitmap(await Images.loadHoldImage(holdBody));
-        // // @ts-expect-error 只读是对外的
-        // Images.HOLD_HEAD = await createImageBitmap(await Images.loadNoteImage(holdHead));
-        // // @ts-expect-error 只读是对外的
-        // Images.DRAG = await createImageBitmap(await Images.loadNoteImage(drag));
-        // // @ts-expect-error 只读是对外的
-        // Images.FLICK = await createImageBitmap(await Images.loadNoteImage(flick));
         // @ts-expect-error 只读是对外的
         Images.ANCHOR = await createImageBitmap(await Images.loadImage(anchor));
         // @ts-expect-error 只读是对外的
-        Images.CHORD = await createImageBitmap(await Images.loadNoteImage(chord));
-        // @ts-expect-error 只读是对外的
         Images.BELOW = await createImageBitmap(await Images.loadNoteImage(below));
-        // // @ts-expect-error 只读是对外的
-        // Images.HIT_FX = await createImageBitmap(await Images.loadImage(hitFx));
-
-        // // @ts-expect-error 只读是对外的
-        // Images.TAP_HL = await createImageBitmap(tapHl ? Images.loadNoteImage(tapHl) : Images.generateHL(Images.TAP));
-        // // @ts-expect-error 只读是对外的
-        // Images.HOLD_HEAD_HL = await createImageBitmap(holdHeadHl ? Images.loadNoteImage(holdHeadHl) :  Images.generateHL(Images.HOLD_HEAD));
-        // // @ts-expect-error 只读是对外的
-        // Images.DRAG_HL = await createImageBitmap(dragHl ? Images.loadNoteImage(dragHl) :  Images.generateHL(Images.DRAG));
-        // // @ts-expect-error 只读是对外的
-        // Images.FLICK_HL = await createImageBitmap(flickHl ? Images.loadNoteImage(flickHl) :  Images.generateHL(Images.FLICK));
-
     }
     static async loadImage(src: ImageSource) {
         src = src instanceof Blob ? URL.createObjectURL(src) : src;

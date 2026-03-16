@@ -3,7 +3,7 @@ import { Demuxer, Decoder } from "node-av/api";
 import { AVMEDIA_TYPE_AUDIO } from "node-av/constants";
 import type { Player } from "./player";
 
-interface SoundEntry { time: number, type: number }
+interface SoundEntry { time: number, type: number, mixedSamples?: number }
 
 const SOUND_QUEUE_SIZE = 4096;
 
@@ -87,27 +87,50 @@ export class AudioProcessor {
             packet.free();
         }
 
-        // 计算总采样数
+        // 计算总采样数（交错格式：每个样本包含所有声道）
         let totalSamples = 0;
         for (const frame of allFrames) {
-            // frame.data 是 Buffer[]，每个 buffer 是一个声道的采样数据
             const dataArray = Array.isArray(frame.data) ? frame.data : [frame.data];
-            for (const buf of dataArray) {
-                totalSamples += buf.length / 4; // Float32 每个样本 4 字节
+            if (dataArray.length === audioChannels) {
+                // 平面格式：每个 buffer 是一个声道的数据
+                totalSamples += (dataArray[0].length / 4) * audioChannels;
+            } else {
+                // 交错格式：一个 buffer 包含所有声道
+                totalSamples += dataArray[0].length / 4;
             }
         }
 
-        // 合并所有采样数据
+        // 合并所有采样数据为交错格式
         const buffer = new Float32Array(totalSamples);
         let offset = 0;
 
         for (const frame of allFrames) {
             const dataArray = Array.isArray(frame.data) ? frame.data : [frame.data];
-            for (const buf of dataArray) {
-                const frameData = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
+            
+            if (dataArray.length === audioChannels) {
+                // 平面格式 -> 交错格式转换
+                const samplesPerChannel = dataArray[0].length / 4;
+                for (let i = 0; i < samplesPerChannel; i++) {
+                    for (let ch = 0; ch < audioChannels; ch++) {
+                        const frameData = new Float32Array(
+                            dataArray[ch].buffer, 
+                            dataArray[ch].byteOffset, 
+                            dataArray[ch].byteLength / 4
+                        );
+                        buffer[offset++] = frameData[i];
+                    }
+                }
+            } else {
+                // 已经是交错格式，直接复制
+                const frameData = new Float32Array(
+                    dataArray[0].buffer, 
+                    dataArray[0].byteOffset, 
+                    dataArray[0].byteLength / 4
+                );
                 buffer.set(frameData, offset);
                 offset += frameData.length;
             }
+            
             frame.free();
         }
 
@@ -134,11 +157,12 @@ export class AudioProcessor {
 
     /**
      * 记录音效条目（由 Player 调用）
-     * @param time 音符时间（秒）
      * @param type 音符类型
+     * @param noteTime 音符的精确播放时间（秒），如果不传则使用当前播放时间
      */
-    playNoteSound(type: NoteType) {
-        this.soundQueue[this.soundQueueIndex++] = { time: this.player.audioCurrentTime, type }
+    playNoteSound(type: NoteType, noteTime?: number) {
+        const time = noteTime !== undefined ? noteTime : this.player.audioCurrentTime;
+        this.soundQueue[this.soundQueueIndex++] = { time, type }
         this.soundQueueIndex %= SOUND_QUEUE_SIZE;
     }
 

@@ -66,6 +66,7 @@ type HTMLImageElement = Image;
 type ProcessedTexture = Canvas;
 const OffscreenCanvas = Canvas;
 type OffscreenCanvasRenderingContext2D = CanvasRenderingContext2D;
+const __IS_BROWSER = false;
 
 export class Player extends EventTarget {
     canvas: HTMLCanvasElement;
@@ -99,6 +100,14 @@ export class Player extends EventTarget {
      * 为渲染部分采用不同的偏移值（比如蓝牙耳机延迟高，容易音画不同步）
      */
     renderingOffset = 0;
+    /**
+     * 若设为真，则打击特效产生后会留在原地，而不是跟着判定线移动。
+     * 
+     * 这是本家标准行为，但是如果追求性能，可以设为false。
+     * 
+     * 在浏览器端，这个值默认就是false。
+     */
+    hitEffectNoFollows = !__IS_BROWSER;
 
     
     textureMapping: Map<string, ImageBitmap> = new Map();
@@ -361,7 +370,7 @@ audioCurrentTime: number = 0;
         context.textAlign = "center";
         context.font = "20px phigros";
         context.fillStyle = "#ddd";
-        
+
         this.dispatchEvent(new Event("drawn"));
 
         // this.soundQueue = [];
@@ -396,6 +405,31 @@ audioCurrentTime: number = 0;
             for (let line of judgeLine.children) {
                 this.precalculate(myMatrix, line, beats);
             }
+        }
+    }
+    /**
+     * 计算判定线在某时刻的矩阵。特别适用于过去时。
+     * 
+     * 在当前代码，这个方法仅用在开启打击特效滞留时。
+     * 
+     * （KPP尽可能遵守“无状态渲染”，不会缓存打击特效在之前的位置。）
+     * @param judgeLine 
+     * @param beats 
+     */
+    calculateLineMatrix(judgeLine: JudgeLine, beats: number) {
+        const x = judgeLine.getStackedValue("moveX", beats);
+        const y = judgeLine.getStackedValue("moveY", beats);
+        const theta = judgeLine.getStackedValue("rotate", beats) * Math.PI / 180;
+        const father = judgeLine.father;
+        if (!father) {
+            return identity.translate(x + 675, -y + 450).rotate(-theta).scale(1, -1);
+        } else if (judgeLine.rotatesWithFather) {
+            const parentMatrix = this.calculateLineMatrix(father, beats);
+            return parentMatrix.translate(x, y).rotate(-theta);
+        } else {
+            const parentMatrix = this.calculateLineMatrix(father, beats);
+            const {x: tx, y: ty} = new Coordinate(x, y).mul(parentMatrix);
+            return identity.translate(tx, ty).rotate(-theta).scale(1, -1);
         }
     }
     renderLine(judgeLine: JudgeLine, beats: number) {
@@ -478,19 +512,24 @@ audioCurrentTime: number = 0;
         // 法向量是单位向量，分母是1，不写
         /** the distance between the center and the line */
         const innerProd = innerProduct(toCenter, nVector);
+        // 法向量朝向判定线正面
+        // 现在法向量和内积的结果：如果正面对着中心点，内积为正，反之为负
+        // 因此，innerProd的正负是重要的。如果offset为负，note在更低的地方被判定，“实际判定线”距离圆心更远
+        // 所以distance要变大。因此，是innerProd - offset的绝对值。
+        // （这是KPA家族代码中不可逾越的一座史山）
         const judgeLineCover = judgeLine.cover;
         const getYs = judgeLineCover ? (offset: number) => {
             
-            const distance: number = Math.abs(innerProd + offset);
-            let startY = distance - RENDER_SCOPE + offset;
-            const endY = distance + RENDER_SCOPE + offset;
+            const distance: number = Math.abs(innerProd - offset);
+            let startY = distance - RENDER_SCOPE;
+            const endY = distance + RENDER_SCOPE;
             if (startY < 0) startY = 0;
             return [startY, endY]
         } : (offset: number) => {
             
-            const distance: number = Math.abs(innerProd + offset);
-            const startY = distance - RENDER_SCOPE + offset; // 显示线下音符
-            const endY = distance + RENDER_SCOPE + offset;
+            const distance: number = Math.abs(innerProd - offset);
+            const startY = distance - RENDER_SCOPE; // 显示线下音符
+            const endY = distance + RENDER_SCOPE;
             return [startY, endY]
         }
         
@@ -529,7 +568,7 @@ audioCurrentTime: number = 0;
         for (let trees of [holdTrees, noteTrees]) {
             for (const [_, list] of trees) {
                 const speedVal: number = list.speed;
-                if (DRAWS_NOTES) {
+                if (DRAWS_NOTES && alpha >= 0) {
                     // debugger
                     // 渲染音符
                     // console.time("computeTimeRange")
@@ -638,7 +677,8 @@ audioCurrentTime: number = 0;
     }
     renderHitEffects(matrix: Matrix33, tree: NNList, startBeats: number, endBeats: number, timeCalculator: TimeCalculator) {
         let noteNode = tree.getNodeAt(startBeats, true);
-        const { hitContext, respack, renderingTime } = this;
+        const { hitContext, respack, renderingTime, hitEffectNoFollows } = this;
+        const line = tree.parentLine
         // console.log(hitContext.getTransform())
         const end = tree.getNodeAt(endBeats);
         if (noteNode.type === NodeType.TAIL) {
@@ -655,7 +695,7 @@ audioCurrentTime: number = 0;
                 }
                 const posX = note.positionX;
                 const yo = note.yOffset * (note.above ? 1 : -1);
-                const {x, y} = new Coordinate(posX, yo).mul(matrix);
+                const {x, y} = new Coordinate(posX, yo).mul(hitEffectNoFollows ? this.calculateLineMatrix(line, beats) : matrix);
                 // console.log("he", x, y);
                 const he = note.tintHitEffects;
                 respack.hitDrawer(hitContext, x, y, HIT_EFFECT_SIZE, renderingTime - timeCalculator.toSeconds(beats), he)
@@ -676,9 +716,11 @@ audioCurrentTime: number = 0;
      */
     renderHoldHitEffects(matrix: Matrix33, tree: HNList, beats: number, startBeats: number, endBeats: number, timeCalculator: TimeCalculator) {
         const start = tree.getNodeAt(startBeats, true);
-        const { hitContext, respack, renderingTime } = this;
+        const { hitContext, respack, renderingTime, hitEffectNoFollows } = this;
+        const line = tree.parentLine
         let noteNode = start;
         const end = tree.getNodeAt(endBeats);
+        const hitEffectDuration = respack.hitFxDuration;
         if (noteNode.type === NodeType.TAIL) {
             return;
         }
@@ -692,14 +734,24 @@ audioCurrentTime: number = 0;
                 if (note.isFake) {
                     continue;
                 }
-                if (startBeats > TC.toBeats(note.endTime)) {
+                if (hitEffectNoFollows) {
+                    const timeSecs = timeCalculator.toSeconds(beats);
+                    const endTimeSecs = timeCalculator.toSeconds(TC.toBeats(note.endTime));
+                    if (timeSecs > endTimeSecs + hitEffectDuration) {
+                        continue;
+                    }
+                } else if (startBeats > TC.toBeats(note.endTime)) {
                     continue;
                 }
                 const posX = note.positionX;
                 const yo = note.yOffset * (note.above ? 1 : -1);
-                const {x, y} = new Coordinate(posX, yo).mul(matrix);
-                const tintHE = note.tintHitEffects;
-                respack.hitDrawer(hitContext, x, y, HIT_EFFECT_SIZE, renderingTime - timeCalculator.toSeconds(Math.floor(beats)), tintHE)
+                let intBeats = Math.floor(beats);
+                while (intBeats > startBeats) {
+                    const {x, y} = new Coordinate(posX, yo).mul(hitEffectNoFollows ? this.calculateLineMatrix(line, intBeats) : matrix);
+                    const tintHE = note.tintHitEffects;
+                    respack.hitDrawer(hitContext, x, y, HIT_EFFECT_SIZE, renderingTime - timeCalculator.toSeconds(intBeats), tintHE);
+                    intBeats--;
+                }
             }
             noteNode = <NoteNode>noteNode.next
         }

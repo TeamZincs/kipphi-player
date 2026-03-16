@@ -352,6 +352,8 @@ export async function renderChartFast(
             // 获取并消费该时间段内的音效
             const soundEntries = audioProcessor.getSoundEffects();
             if (soundEntries.length > 0) {
+                //console.log(`[Render] Frame ${videoFrameIndex}: Got ${soundEntries.length} sound entries, time=${currentTime.toFixed(3)}`);
+                
                 // 计算该帧对应的音频采样范围
                 const startSample = Math.floor(frameStartTime * targetSampleRate) * targetChannels;
                 
@@ -360,23 +362,72 @@ export async function renderChartFast(
                     const sound = audioProcessor.getSoundEffect(entry.type);
                     if (!sound) continue;
 
-                    // 计算音效在帧内的相对开始位置
-                    const effectStartOffset = (entry.time - frameStartTime) * targetSampleRate * targetChannels;
-                    const startSampleInFrame = startSample + Math.floor(effectStartOffset);
-                    
                     const effectData = sound.data;
                     const effectChannels = sound.channels;
+                    const effectSampleRate = sound.sampleRate;
                     const effectSamplesPerChannel = Math.floor(effectData.length / effectChannels);
-                    const availableSamples = Math.floor((mixedAudioBuffer.length - startSampleInFrame) / targetChannels);
-                    const samplesToMix = Math.min(effectSamplesPerChannel, availableSamples);
+
+                    // 使用已跟踪的混入采样数，避免浮点误差和重复混入
+                    let effectSampleOffset = entry.mixedSamples ?? 0;
+
+                    // 只混入剩余的样本（音效已结束则 samplesRemaining <= 0）
+                    const samplesRemaining = effectSamplesPerChannel - effectSampleOffset;
+                    if (samplesRemaining <= 0) {
+                        // 音效已结束，跳过
+                        continue;
+                    }
+
+                    // 将音效采样率下的样本数转换为目标采样率下的样本数
+                    const targetSamplesRemaining = Math.floor(samplesRemaining * targetSampleRate / effectSampleRate);
                     
+                    // 计算该帧可用的采样数
+                    const startSampleInFrame = startSample;
+                    const availableSamples = Math.floor((mixedAudioBuffer.length - startSampleInFrame) / targetChannels);
+
+                    // 计算实际要混入的样本数
+                    const samplesToMix = Math.min(targetSamplesRemaining, availableSamples);
+                    if (samplesToMix <= 0) {
+                        continue;
+                    }
+
+                    // 交错格式混入：需要按目标采样率读取音效数据
+                    const VOLUME_SCALE = 0.5; // 音效音量衰减系数，防止多音效叠加导致削波
+
                     for (let i = 0; i < samplesToMix; i++) {
+                        // 计算在音效原始数据中的位置（需要按比例采样）
+                        const effectPos = effectSampleOffset + (i * effectSampleRate / targetSampleRate);
+                        const effectSampleIndex = Math.floor(effectPos);
+                        const effectSampleFrac = effectPos - effectSampleIndex;
+
                         for (let ch = 0; ch < targetChannels && ch < effectChannels; ch++) {
                             const destIndex = startSampleInFrame + i * targetChannels + ch;
-                            const effectIndex = ch * effectSamplesPerChannel + i;
-                            mixedAudioBuffer[destIndex] = mixedAudioBuffer[destIndex] + effectData[effectIndex];
+
+                            // 使用线性插值获取更平滑的采样值
+                            const effectIndex0 = effectSampleIndex * effectChannels + ch;
+                            const effectIndex1 = (effectSampleIndex + 1) * effectChannels + ch;
+
+                            let sampleValue: number;
+                            if (effectIndex1 < effectData.length) {
+                                // 线性插值
+                                const s0 = effectData[effectIndex0];
+                                const s1 = effectData[effectIndex1];
+                                sampleValue = s0 + (s1 - s0) * effectSampleFrac;
+                            } else {
+                                // 边界处使用最近邻
+                                sampleValue = effectData[effectIndex0];
+                            }
+
+                            // 应用音量衰减并叠加
+                            mixedAudioBuffer[destIndex] += sampleValue * VOLUME_SCALE;
+
+                            // 限制输出范围防止削波
+                            mixedAudioBuffer[destIndex] = Math.max(-1, Math.min(1, mixedAudioBuffer[destIndex]));
                         }
                     }
+
+                    // 更新已混入的采样数（防止重复混入）
+                    const mixedInSamples = Math.floor(samplesToMix * effectSampleRate / targetSampleRate);
+                    entry.mixedSamples = (entry.mixedSamples ?? 0) + mixedInSamples;
                 }
             }
 
@@ -407,13 +458,23 @@ export async function renderChartFast(
             videoFrameIndex++;
         }
 
-            // 生成音频帧（每次产生 2 个音频块以匹配视频节奏）
+            // 生成音频帧（确保不超前于视频渲染进度）
             // 音频块每块 1024 采样点，约 23.2ms，视频每帧 16.67ms
-            // 每个视频帧对应约 1.4 个音频块，所以每 5 个视频帧产生 7 个音频块
+            // 音频块生成进度必须与视频帧进度匹配，避免读取未混入音效的数据
             const audioBlocksPerVideo = 7 / 5;
-            const audioBlocksToGenerate = Math.floor(audioBlocksPerVideo);
+            
+            // 计算当前视频进度允许生成的最大音频块索引
+            // 确保音频块不会"跑太快"，读取到尚未混入音效的区域
+            const videoTime = left + videoFrameIndex / fps;
+            const maxAudioBlockIndex = Math.floor(videoTime * targetSampleRate / blockSize);
+            
+            // 限制音频块生成数量不超过视频进度
+            const allowedAudioBlocks = Math.min(
+                Math.floor(audioBlocksPerVideo),
+                Math.max(0, maxAudioBlockIndex - audioBlockIndex)
+            );
 
-            for (let i = 0; i < audioBlocksToGenerate && audioBlockIndex < totalAudioBlocks; i++) {
+            for (let i = 0; i < allowedAudioBlocks && audioBlockIndex < totalAudioBlocks; i++) {
                 const start = audioBlockIndex * blockSizeWithChannels;
                 const end = Math.min(start + blockSizeWithChannels, mixedAudioBuffer.length);
                 const chunk = mixedAudioBuffer.subarray(start, end);
