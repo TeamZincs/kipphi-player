@@ -1,5 +1,6 @@
 {
   "name": "kpp-render",
+  "version": "2.1.1",
   "description": "Server side Phigros Chart Rendering, with decent performance and good compatibilities.",
   "keywords": ["phigros", "node-js", "ffmpeg", "skia", "canvas", "music-game"],
   "module": "index.ts",
