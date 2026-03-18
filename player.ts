@@ -58,7 +58,8 @@ const HALF_HIT = HIT_EFFECT_SIZE / 2
 // 以原点为中心，渲染的半径
 const RENDER_SCOPE = 900;
 
-const COMBO_TEXT = "KIPPHI"
+const COMBO_TEXT = "KIPPHI";
+
 
 const BASE_LINE_LENGTH = 4050;
 const HIT_FX_SIZE = 1024;
@@ -378,7 +379,7 @@ export class Player extends EventTarget {
             }
             this.computeCombo(renderingBeats);
             context.fillStyle = "#ddd"
-            context.font = "40px phigros"
+            context.font = "32px phigros"
             context.textAlign = "left";
 
 
@@ -387,29 +388,30 @@ export class Player extends EventTarget {
             const level = chart.level;
             const combo = this.currentCombo;
             setTransform(chart.nameAttach)
-            context.fillText(title, -600, 400);
+            context.fillText(title, -640, 420);
 
-            const metrics = context.measureText(level)
+
+            context.textAlign = "right";
             setTransform(chart.levelAttach)
-            context.fillText(level, 600 - metrics.width, 400);
+            context.fillText(level, 640, 420);
+
+            context.font = "40px phigros";
 
             const score = combo / chart.maxCombo * 100_0000;
             const text = score.toFixed(0).padStart(7, "0")
             setTransform(chart.scoreAttach)
-            context.textAlign = "right";
-            context.fillText(text, 600, -400);
+            context.fillText(text, 640, -390);
 
             if (combo >= 3) {
                 context.textAlign = "center";
                 
-                context.font = "60px phigros"
+                context.font = "64px phigros"
                 setTransform(chart.combonumberAttach)
-                context.fillText(combo.toString(), 0, -400);
+                context.fillText(combo.toString(), 0, -384);
 
-                context.font = "20px phigros";
-                const h = 32;
+                context.font = "24px phigros";
                 setTransform(chart.comboAttach)
-                context.fillText(COMBO_TEXT, 0, -400 + h);
+                context.fillText(COMBO_TEXT, 0, -356);
 
 
             }
