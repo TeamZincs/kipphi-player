@@ -56,11 +56,12 @@ const HIT_EFFECT_SIZE = 200;
 const HALF_HIT = HIT_EFFECT_SIZE / 2
 
 // 以原点为中心，渲染的半径
-const RENDER_SCOPE = 900;
+const RENDER_SCOPE = 1000;
 
 const COMBO_TEXT = "KIPPHI";
 
 
+const STANDARD_WIDTH =  1350;
 const BASE_LINE_LENGTH = 4050;
 const HIT_FX_SIZE = 1024;
 const getVector = (theta: number): [Vector, Vector] => [[Math.cos(theta), Math.sin(theta)], [-Math.sin(theta), Math.cos(theta)]]
@@ -132,6 +133,8 @@ export class Player extends EventTarget {
      */
     hitEffectNoFollows = !__IS_BROWSER;
 
+    readonly widthRatio: number;
+
     
     textureMapping: Map<string, ImageBitmap> = new Map();
     
@@ -155,6 +158,7 @@ export class Player extends EventTarget {
         this.aspect = DEFAULT_ASPECT_RATIO;
         this.noteSize = NOTE_WIDTH;
         this.noteHeight = NOTE_HEIGHT;
+        this.widthRatio = canvas.width === STANDARD_WIDTH ? 1 : canvas.width / STANDARD_WIDTH;
         this.initCoordinate();
         // #default
         this.audio = audio;
@@ -162,7 +166,6 @@ export class Player extends EventTarget {
             this.playing = false;
         })
         // #enddefault
-        this.initGreyScreen();
     }
     override addEventListener(type: "drawn" | "play" | "pause", listener: (e: Event) => void, options?: EventListenerOptions): void {
         super.addEventListener(type, listener, options);
@@ -204,7 +207,7 @@ export class Player extends EventTarget {
         
         // console.log(context.getTransform())
         const height = 900;
-        const width = 1350;
+        const width = this.canvas.width;
         canvas.height = height;
         canvas.width = width;
         hitCanvas.height = height;
@@ -222,32 +225,12 @@ export class Player extends EventTarget {
         hitContext.save()
         // console.log(context.getTransform())
     }
-    renderDropScreen() {
-        const {canvas, context} = this;
-        context.fillStyle = "#6cf"
-        context.fillRect(-675, -450, 1350, 900);
-        context.fillStyle = "#444"
-        context.font = "100px phigros"
-        const metrics = context.measureText("松手释放");
-        context.fillText("松手释放", -metrics.width/2, 0)
-        context.restore();
-        context.save();
-    }
-    renderGreyScreen() {
-        const {canvas, context} = this;
-        context.fillStyle = "#AAA"
-        context.fillRect(-675, -450, 1350, 900);
-        context.fillStyle = "#444"
-        context.font = "100px phigros"
-        const metrics = context.measureText("放入文件");
-        context.fillText("放入文件", -metrics.width/2, 0)
-        context.restore();
-        context.save();
-    }
-    initGreyScreen() {
-        const {canvas, context} = this;
-        this.renderGreyScreen()
-    }
+    /**
+     * 计算当前combo。
+     * 
+     * 这是少有的一个非无状态的方法。
+     * @param renderingBeats 
+     */
     computeCombo(renderingBeats: number) {
         const {chart} = this;
         const beats = renderingBeats;
@@ -316,14 +299,15 @@ export class Player extends EventTarget {
         // console.time("render")
         const context = this.context;
 
-
-        context.setTransform(1, 0, 0, 1, 675, 450);
+        const width = this.canvas.width;
+        const hw = width / 2
+        context.setTransform(1, 0, 0, 1, hw, 450);
         context.save();
         const hitContext = this.hitContext;
-        hitContext.clearRect(0, 0, 1350, 900);
+        hitContext.clearRect(0, 0, width, 900);
         // 虽然还要加个图片，但是如果不clear，在Node环境下，会泄漏很多内存
-        context.clearRect(-1350, -900, 2700, 1800);
-        context.drawImage(this.background, -675, -450, 1350, 900);
+        context.clearRect(-width, -900, width * 2, 1800);
+        context.drawImage(this.background, -hw, -450, width, 900);
         // 涂灰色（背景变暗）
         context.fillStyle = "#0008";
         context.fillRect(-27000, -18000, 54000, 36000)
@@ -346,7 +330,7 @@ export class Player extends EventTarget {
         // console.log("rendering")
         const lineQueue = [...this.chart.judgeLines].sort((a, b) => (a.zOrder ?? 0) - (b.zOrder ?? 0));
         for (let line of this.chart.orphanLines) {
-            this.precalculate(identity.translate(675, 450).scale(1, -1), line, renderingBeats);
+            this.precalculate(identity.translate(hw, 450).scale(1, -1), line, renderingBeats);
         }
         for (let line of lineQueue) {
             if (line.optimized) {
@@ -362,7 +346,7 @@ export class Player extends EventTarget {
         // drawLine(hitContext, 0, 900, 1350, 0);
         
         context.setTransform(1, 0, 0, 1, 0, 0);
-        context.drawImage(this.hitCanvas, 0, 0, 1350, 900)
+        context.drawImage(this.hitCanvas, 0, 0, width, 900)
         context.restore()
 
 
@@ -371,7 +355,7 @@ export class Player extends EventTarget {
             context.save()
             const setTransform = (lineOrNull: JudgeLine | null) => {
                 if (!lineOrNull) {
-                    context.setTransform(identity.translate(675, 450));
+                    context.setTransform(identity.translate(hw, 450));
                 } else {
                     context.setTransform(lineOrNull.renderMatrix);
                     context.scale(1, -1)
@@ -388,19 +372,19 @@ export class Player extends EventTarget {
             const level = chart.level;
             const combo = this.currentCombo;
             setTransform(chart.nameAttach)
-            context.fillText(title, -640, 420);
+            context.fillText(title, -hw + 35, 420);
 
 
             context.textAlign = "right";
             setTransform(chart.levelAttach)
-            context.fillText(level, 640, 420);
+            context.fillText(level, hw - 35, 420);
 
             context.font = "40px phigros";
 
             const score = combo / chart.maxCombo * 100_0000;
             const text = score.toFixed(0).padStart(7, "0")
             setTransform(chart.scoreAttach)
-            context.fillText(text, 640, -390);
+            context.fillText(text, hw - 35, -390);
 
             if (combo >= 3) {
                 context.textAlign = "center";
@@ -429,7 +413,7 @@ export class Player extends EventTarget {
             this.lastRenderingRealTime = now;
         }
         context.fillText(this.lastMeasuredFPSStr, 30, 20);
-        context.fillText(this.time.toFixed(2) + " " + renderingBeats.toFixed(2), 675, 900)
+        context.fillText(this.time.toFixed(2) + " " + renderingBeats.toFixed(2), hw, 900)
         // #enddefault
 
         this.dispatchEvent(new Event("drawn"));
@@ -456,7 +440,9 @@ export class Player extends EventTarget {
         judgeLine.rotate = theta;
         judgeLine.alpha = alpha;
         const {x: transformedX, y: transformedY} = new Coordinate(x, y).mul(matrix);
-        judgeLine.transformedX = transformedX;
+        
+        const ratio = this.widthRatio;
+        judgeLine.transformedX = transformedX * ratio;
         judgeLine.transformedY = transformedY;
         const myMatrix = judgeLine.rotatesWithFather ? matrix.translate(x, y).rotate(-theta) : identity.translate(transformedX, transformedY).rotate(-theta).scale(1, -1);
         
@@ -478,12 +464,13 @@ export class Player extends EventTarget {
      * @param beats 
      */
     calculateLineMatrix(judgeLine: JudgeLine, beats: number) {
+        const hw = this.canvas.width / 2;
         const x = judgeLine.getStackedValue("moveX", beats);
         const y = judgeLine.getStackedValue("moveY", beats);
         const theta = judgeLine.getStackedValue("rotate", beats) * Math.PI / 180;
         const father = judgeLine.father;
         if (!father) {
-            return identity.translate(x + 675, -y + 450).rotate(-theta).scale(1, -1);
+            return identity.translate(x + hw, -y + 450).rotate(-theta).scale(1, -1);
         } else if (judgeLine.rotatesWithFather) {
             const parentMatrix = this.calculateLineMatrix(father, beats);
             return parentMatrix.translate(x, y).rotate(-theta);
@@ -747,6 +734,7 @@ export class Player extends EventTarget {
         const line = tree.parentLine
         // console.log(hitContext.getTransform())
         const end = tree.getNodeAt(endBeats);
+        const ratio = this.widthRatio;
         if (noteNode.type === NodeType.TAIL) {
             return;
         }
@@ -759,7 +747,7 @@ export class Player extends EventTarget {
                 if (note.isFake) {
                     continue;
                 }
-                const posX = note.positionX;
+                const posX = note.positionX * ratio;
                 const yo = note.yOffset * (note.above ? 1 : -1);
                 const {x, y} = new Coordinate(posX, yo).mul(hitEffectNoFollows ? this.calculateLineMatrix(line, beats) : matrix);
                 // console.log("he", x, y);
@@ -787,6 +775,7 @@ export class Player extends EventTarget {
         let noteNode = start;
         const end = tree.getNodeAt(endBeats);
         const hitEffectDuration = respack.hitFxDuration;
+        const ratio = this.widthRatio;
         if (noteNode.type === NodeType.TAIL) {
             return;
         }
@@ -809,7 +798,7 @@ export class Player extends EventTarget {
                 } else if (startBeats > TC.toBeats(note.endTime)) {
                     continue;
                 }
-                const posX = note.positionX;
+                const posX = note.positionX * ratio;
                 const yo = note.yOffset * (note.above ? 1 : -1);
                 let intBeats = Math.floor(beats);
                 while (intBeats > startBeats) {
@@ -876,6 +865,8 @@ export class Player extends EventTarget {
         const context = this.context;
         const respack = this.respack;
         let zero = 0;
+        const ratio = this.widthRatio;
+        const positionX = note.positionX * ratio;
         
         if (note.yOffset) {
             positionY += note.yOffset;
@@ -907,23 +898,23 @@ export class Player extends EventTarget {
             const HOLD_BODY = chord ? respack.HOLD_BODY_HL : respack.HOLD_BODY;
             const HOLD_HEAD = chord ? respack.HOLD_HEAD_HL : respack.HOLD_HEAD;
             const HOLD_TAIL = chord ? respack.HOLD_TAIL_HL : respack.HOLD_TAIL;
-            context.drawImage(HOLD_BODY, note.positionX - half, positionY - length, size, length);
+            context.drawImage(HOLD_BODY, positionX - half, positionY - length, size, length);
             if (!isJudging || respack.holdKeepHead) {
                 const h = size * (HOLD_HEAD.height / HOLD_HEAD.width)
-                context.drawImage(HOLD_HEAD, note.positionX - half, positionY - (respack.holdCompact ? h / 2 : 0),
+                context.drawImage(HOLD_HEAD, positionX - half, positionY - (respack.holdCompact ? h / 2 : 0),
                     size, h);
             }
             const tailHeight = size * (HOLD_TAIL.height / HOLD_TAIL.width)
-            context.drawImage(HOLD_TAIL, note.positionX - half, positionY - length - (respack.holdCompact ? tailHeight / 2 : tailHeight),
+            context.drawImage(HOLD_TAIL, positionX - half, positionY - length - (respack.holdCompact ? tailHeight / 2 : tailHeight),
                 size, tailHeight);
         } else {
-            respack.noteDrawer(context, note.positionX, positionY, size, this.noteSize, note.type, chord, note.tint);
+            respack.noteDrawer(context, positionX, positionY, size, this.noteSize, note.type, chord, note.tint);
         }
         
         // 不再使用叠加的方法
         
         if (!note.above) {
-            context.drawImage(Images.BELOW, note.positionX - half, positionY - NOTE_HEIGHT / 2, size, NOTE_HEIGHT);
+            context.drawImage(Images.BELOW, positionX - half, positionY - NOTE_HEIGHT / 2, size, NOTE_HEIGHT);
         }
         context.restore()
         

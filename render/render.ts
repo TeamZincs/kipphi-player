@@ -41,13 +41,13 @@ export async function renderChartFast(
     illustrationBlobOrBuffer: Blob | Buffer,
     textureFetcher: (name: string) => Promise<Buffer>,
     audioBuffer: Buffer,
+    width = 1600,
     range?: [number, number]
 ): Promise<{
     out: Buffer;
     duration: number;
     fps: number;
 }> {
-    const width = 1350;
     const height = 900;
     const fps = 60;
     const left = range && range[0] || 0;
