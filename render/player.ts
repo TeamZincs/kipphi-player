@@ -281,7 +281,7 @@ audioCurrentTime: number = 0;
         // console.log("rendering")
         const lineQueue = [...this.chart.judgeLines].sort((a, b) => (a.zOrder ?? 0) - (b.zOrder ?? 0));
         for (let line of this.chart.orphanLines) {
-            this.precalculate(identity.translate(hw, 450).scale(1, -1), line, renderingBeats);
+            this.precalculate(identity.translate(hw, 450).scale(this.widthRatio, -1), line, renderingBeats);
         }
         for (let line of lineQueue) {
             if (line.optimized) {
@@ -726,9 +726,8 @@ audioCurrentTime: number = 0;
                     continue;
                 }
                 if (hitEffectNoFollows) {
-                    const timeSecs = timeCalculator.toSeconds(beats);
-                    const endTimeSecs = timeCalculator.toSeconds(TC.toBeats(note.endTime));
-                    if (timeSecs > endTimeSecs + hitEffectDuration) {
+                    const endTimeSecs = timeCalculator.toSeconds(Math.floor(TC.toBeats(note.endTime)));
+                    if (renderingTime > endTimeSecs + hitEffectDuration) {
                         continue;
                     }
                 } else if (startBeats > TC.toBeats(note.endTime)) {
@@ -736,7 +735,7 @@ audioCurrentTime: number = 0;
                 }
                 const posX = note.positionX * ratio;
                 const yo = note.yOffset * (note.above ? 1 : -1);
-                let intBeats = Math.floor(beats);
+                let intBeats = Math.floor(Math.min(beats, TC.toBeats(note.endTime)));
                 while (intBeats > startBeats) {
                     const {x, y} = new Coordinate(posX, yo).mul(hitEffectNoFollows ? this.calculateLineMatrix(line, intBeats) : matrix);
                     const tintHE = note.tintHitEffects;

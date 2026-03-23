@@ -1,24 +1,33 @@
 {
-  "name": "kpp-render",
-  "version": "2.1.1",
-  "description": "Server side Phigros Chart Rendering, with decent performance and good compatibilities.",
-  "keywords": ["phigros", "node-js", "ffmpeg", "skia", "canvas", "music-game"],
-  "module": "index.ts",
-  "type": "module",
-  "devDependencies": {
-    "@types/bun": "latest"
-  },
-  "peerDependencies": {
-    "typescript": "^5"
-  },
-  "dependencies": {
-    "node-av": "^5.2.2",
-    "skia-canvas": "^3.0.8"
-  },
-  "trustedDependencies": [
-    "@seydx/node-av-win32-x64-mingw",
-    "@seydx/node-av-win32-x64-msvc",
-    "node-av",
-    "skia-canvas"
-  ]
+    "name": "kpp-render",
+    "version": "2.1.1",
+    "description": "Server side Phigros Chart Rendering, with decent performance and good compatibilities.",
+    "keywords": [
+        "phigros",
+        "node-js",
+        "ffmpeg",
+        "skia",
+        "canvas",
+        "music-game"
+    ],
+    "module": "index.ts",
+    "type": "module",
+    "devDependencies": {
+        "@types/bun": "latest"
+    },
+    "peerDependencies": {
+        "typescript": "^5"
+    },
+    "dependencies": {
+        "node-av": "^5.2.2",
+        "skia-canvas": "^3.0.8",
+        "yaml": "2.8.3",
+        "kipphi": "2.1.2-rc.1"
+    },
+    "trustedDependencies": [
+        "@seydx/node-av-win32-x64-mingw",
+        "@seydx/node-av-win32-x64-msvc",
+        "node-av",
+        "skia-canvas"
+    ]
 }
