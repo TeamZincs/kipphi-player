@@ -1,6 +1,6 @@
 {
     "name": "kpp-render",
-    "version": "2.1.1",
+    "version": "2.1.2-rc.1",
     "description": "Server side Phigros Chart Rendering, with decent performance and good compatibilities.",
     "keywords": [
         "phigros",
