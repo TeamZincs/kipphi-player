@@ -81,6 +81,7 @@ type ProcessedTexture = Canvas;
 const OffscreenCanvas = Canvas;
 type OffscreenCanvasRenderingContext2D = CanvasRenderingContext2D;
 const __IS_BROWSER = false;
+const createImageBitmap = async <T>(img: T) => img;
 }
 */
 
@@ -565,8 +566,9 @@ export class Player extends EventTarget {
 
         // Draw Anchor
 
-
-        context.drawImage(Images.ANCHOR, -10, -10)
+        // #default
+        context.drawImage(Images.ANCHOR, -10, -10);
+        // #enddefault
         if (this.showsLineID) {
             context.save();
             context.fillStyle = "white";
@@ -935,10 +937,11 @@ export class Player extends EventTarget {
         }
         
         // 不再使用叠加的方法
-        
+        // #default
         if (!note.above) {
             context.drawImage(Images.BELOW, positionX - half, positionY - NOTE_HEIGHT / 2, size, NOTE_HEIGHT);
         }
+        // #enddefault
         context.restore()
         
     }

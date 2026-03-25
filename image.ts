@@ -24,11 +24,12 @@ const CELL_SIZE = 256;
 
 type ImageSource = Blob | string/* #node{ | Buffer} */;
 export class Images {
+    // #default
     static readonly ANCHOR: ImageBitmap
     /** 多押 */
-    static readonly CHORD: ImageBitmap
     static readonly BELOW: ImageBitmap
     // static readonly HIT_FX: ImageBitmap
+    // #enddefault
 
     static async loadAndOptimize({
         anchor, below
@@ -36,10 +37,12 @@ export class Images {
         anchor: ImageSource,
         below: ImageSource,
     }) {
+        // #default
         // @ts-expect-error 只读是对外的
         Images.ANCHOR = await createImageBitmap(await Images.loadImage(anchor));
         // @ts-expect-error 只读是对外的
         Images.BELOW = await createImageBitmap(await Images.loadNoteImage(below));
+        // #enddefault
     }
     static async loadImage(src: ImageSource) {
         src = src instanceof Blob ? URL.createObjectURL(src) : src;
@@ -86,13 +89,6 @@ export class Images {
     //     ][type + (hightlighted ? 4 : 0)]
     // }
 
-    protected static generateHL(unhighlighted: ImageBitmap) {
-        const canvas = new OffscreenCanvas(NOTE_WIDTH, NOTE_HEIGHT);
-        const context = canvas.getContext("2d");
-        context.drawImage(unhighlighted, 0, 0);
-        context.drawImage(Images.CHORD, 0, 0);
-        return canvas;
-    }
 }
 
 export const drawNthFrame = (context: CanvasRenderingContext2D, source: CanvasImageSource, ord: number, dx: number, dy: number, dw: number, dh: number) => {

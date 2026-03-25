@@ -5,7 +5,7 @@ import type { Player } from "./player";
 
 interface SoundEntry { time: number, type: number, mixedSamples?: number }
 
-const SOUND_QUEUE_SIZE = 4096;
+const SOUND_QUEUE_SIZE = 256;
 
 /**
  * 音频处理器 - 用于缓存音效

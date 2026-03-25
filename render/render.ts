@@ -79,6 +79,7 @@ export async function renderChartFast(
     const canvas = new Canvas(width, height);
     const illustration = await Images.loadImage(illustrationBlobOrBuffer);
     const player = new Player(canvas, audioProcessor, illustration, respack);
+    player.greenLine = -1;
     audioProcessor.linkPlayer(player);
     player.receive(chart, async (name) => {
         const texture = await textureFetcher(name);
