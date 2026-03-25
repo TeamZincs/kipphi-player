@@ -96,6 +96,7 @@ export class Player extends EventTarget {
     private audioProcessor: AudioProcessor;
     playing: boolean;
     background: ImageBitmap;
+    blurredBackground: ProcessedTexture;
     aspect: number;
     noteSize: number;
     noteHeight: number;
@@ -154,6 +155,10 @@ export class Player extends EventTarget {
         this.hitCanvas = new OffscreenCanvas(canvas.width, canvas.height);
         this.hitContext = this.hitCanvas.getContext("2d");
         this.background = background;
+
+        this.blurringRadius = 50;
+
+
         this.playing = false;
         this.aspect = DEFAULT_ASPECT_RATIO;
         this.noteSize = NOTE_WIDTH;
@@ -225,6 +230,25 @@ export class Player extends EventTarget {
         hitContext.save()
         // console.log(context.getTransform())
     }
+    _blurringRadius: number = 50;
+
+    get blurringRadius() {
+        return this._blurringRadius;
+    }
+
+    set blurringRadius(radius: number) {
+        this._blurringRadius = radius;
+        const { canvas, background } = this;
+        const bgCanvas = new OffscreenCanvas(canvas.width, canvas.height);
+        const bgContext = bgCanvas.getContext("2d");
+        bgContext.filter = `blur(${radius})`
+        bgContext.drawImage(background, 0, 0, canvas.width, canvas.height);
+        this.blurredBackground = bgCanvas;
+        createImageBitmap(bgCanvas).then(img => {
+            this.blurredBackground = img;
+        })
+    }
+
     /**
      * 计算当前combo。
      * 
@@ -307,7 +331,7 @@ export class Player extends EventTarget {
         hitContext.clearRect(0, 0, width, 900);
         // 虽然还要加个图片，但是如果不clear，在Node环境下，会泄漏很多内存
         context.clearRect(-width, -900, width * 2, 1800);
-        context.drawImage(this.background, -hw, -450, width, 900);
+        context.drawImage(this.blurredBackground, -hw, -450, width, 900);
         // 涂灰色（背景变暗）
         context.fillStyle = "#0008";
         context.fillRect(-27000, -18000, 54000, 36000)
