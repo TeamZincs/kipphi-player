@@ -1,8 +1,18 @@
 # Kipphi Player - An editor-friendly Phigros Chart Player
 
-奇谱播放器为奇谱发生器的子项目，用于在编辑器中播放Phigros谱面（RPE或KPA格式）。基于[Kipphi](https://github.com/TeamZincs/Kipphi)。
+奇谱播放器为奇谱发生器的子项目，用于在编辑器中播放Phigros谱面（RPE或KPA格式）。基于[Kipphi](https://github.com/TeamZincs/Kipphi)。该播放器秉持“无状态渲染”的原则，这是其编辑器友好性的核心。
 
-Kipphi Player is a subproject of Kipphi, which is a Phigros chart player for editor. Based on [Kipphi](https://github.com/TeamZincs/Kipphi).
+Kipphi Player is a subproject of Kipphi, which is a Phigros chart player for editor. Based on [Kipphi](https://github.com/TeamZincs/Kipphi). This player adopts the principle of "stateless rendering", which is the core of its editor-friendliness.
+
+## 真的是“无状态渲染”吗？
+奇谱播放器的渲染大体上是无状态的，但其计算完判定线的位置等属性后会将数值缓存到判定线对象上（注意奇谱上面并没有这些属性，它们是奇谱播放器扩展上去的）。不过这些属性并不会延续到下一帧使用。
+
+此外，计算 combo 和播放音效时会使用游标优化顺序读取。但对于 Note 渲染、事件定位，由于使用了近乎 O(1) 复杂度的容器（参考奇谱发生器/性能优化策略），因此并不需要游标优化。因此，可以说奇谱播放器几乎就是无状态渲染的。 
+
+## Is it really "stateless rendering"?
+Kipphi Player's rendering is almost stateless, but it will cache some values to the judgeline objects after calculating their positions and other attributes (note that these attributes do not exist in the original Kipphi, but they are added by Kipphi Player). However, these attributes will not be carried over to be used in the next frame.
+
+In addition, when calculating combos and playing sounds, the cursor optimization is used to optimize the order of reading. However, for note rendering and event positioning, because of the nearly O(1) complexity of the container (see Kipphi Generator/performance optimization strategy), no cursor optimization is needed. Therefore, it can be said that Kipphi Player is almost stateless rendering.
 
 ## 使用
 
