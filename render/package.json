@@ -1,6 +1,6 @@
 {
     "name": "kpp-render",
-    "version": "2.1.2-rc.1",
+    "version": "2.1.2",
     "description": "Server side Phigros Chart Rendering, with decent performance and good compatibilities.",
     "keywords": [
         "phigros",
@@ -22,7 +22,7 @@
         "node-av": "^5.2.2",
         "skia-canvas": "^3.0.8",
         "yaml": "2.8.3",
-        "kipphi": "2.1.2-rc.1"
+        "kipphi": "2.1.2"
     },
     "trustedDependencies": [
         "@seydx/node-av-win32-x64-mingw",
