@@ -242,7 +242,7 @@ export class Player extends EventTarget {
         const { canvas, background } = this;
         const bgCanvas = new OffscreenCanvas(canvas.width, canvas.height);
         const bgContext = bgCanvas.getContext("2d");
-        bgContext.filter = `blur(${radius})`
+        bgContext.filter = `blur(${radius}px)`
         bgContext.drawImage(background, 0, 0, canvas.width, canvas.height);
         this.blurredBackground = bgCanvas;
         createImageBitmap(bgCanvas).then(img => {
@@ -651,7 +651,10 @@ export class Player extends EventTarget {
                         drawScope(endY, startY);
                     }
                     const timeRanges = speedVal !== 0 ? judgeLine.computeTimeRange(beats, timeCalculator, startY / speedVal, endY / speedVal) : [[0, Infinity] as [number, number]];
-                    list.timeRanges = timeRanges
+                    list.timeRanges = timeRanges;
+                    if (timeRanges.length === 0 && judgeLine.id === 5 && beats >= 186) {
+                        debugger;
+                    }
                     
                     // console.timeEnd("computeTimeRange");
                     // console.time("Rendering notes");

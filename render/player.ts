@@ -193,7 +193,7 @@ audioCurrentTime: number = 0;
         const { canvas, background } = this;
         const bgCanvas = new OffscreenCanvas(canvas.width, canvas.height);
         const bgContext = bgCanvas.getContext("2d");
-        bgContext.filter = `blur(${radius})`
+        bgContext.filter = `blur(${radius}px)`
         bgContext.drawImage(background, 0, 0, canvas.width, canvas.height);
         this.blurredBackground = bgCanvas;
         createImageBitmap(bgCanvas).then(img => {
