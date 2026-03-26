@@ -463,17 +463,26 @@ export async function renderChartFast(
             // 音频块每块 1024 采样点，约 23.2ms，视频每帧 16.67ms
             // 音频块生成进度必须与视频帧进度匹配，避免读取未混入音效的数据
             const audioBlocksPerVideo = 7 / 5;
-            
-            // 计算当前视频进度允许生成的最大音频块索引
-            // 确保音频块不会"跑太快"，读取到尚未混入音效的区域
-            const videoTime = left + videoFrameIndex / fps;
-            const maxAudioBlockIndex = Math.floor(videoTime * targetSampleRate / blockSize);
-            
-            // 限制音频块生成数量不超过视频进度
-            const allowedAudioBlocks = Math.min(
-                Math.floor(audioBlocksPerVideo),
-                Math.max(0, maxAudioBlockIndex - audioBlockIndex)
-            );
+
+            let allowedAudioBlocks: number;
+
+            // 当视频全部完成后，强制生成所有剩余音频块
+            if (videoFrameIndex >= videoFrameCount) {
+                const remainingBlocks = totalAudioBlocks - audioBlockIndex;
+                allowedAudioBlocks = remainingBlocks;
+            } else {
+                // 视频进行中，限制音频进度不超过视频
+                // 计算当前视频进度允许生成的最大音频块索引
+                // 确保音频块不会"跑太快"，读取到尚未混入音效的区域
+                const videoTime = left + videoFrameIndex / fps;
+                const maxAudioBlockIndex = Math.floor(videoTime * targetSampleRate / blockSize);
+
+                // 限制音频块生成数量不超过视频进度
+                allowedAudioBlocks = Math.min(
+                    Math.floor(audioBlocksPerVideo),
+                    Math.max(0, maxAudioBlockIndex - audioBlockIndex)
+                );
+            }
 
             for (let i = 0; i < allowedAudioBlocks && audioBlockIndex < totalAudioBlocks; i++) {
                 const start = audioBlockIndex * blockSizeWithChannels;
