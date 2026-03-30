@@ -465,14 +465,15 @@ export class Player extends EventTarget {
         judgeLine.rotate = theta;
         judgeLine.alpha = alpha;
         const {x: transformedX, y: transformedY} = new Coordinate(x, y).mul(matrix);
+
         
         const ratio = this.widthRatio;
-        judgeLine.transformedX = transformedX * ratio;
+        judgeLine.transformedX = transformedX;
         judgeLine.transformedY = transformedY;
-        const myMatrix = judgeLine.rotatesWithFather ? matrix.translate(x, y).rotate(-theta) : identity.translate(transformedX, transformedY).rotate(-theta).scale(1, -1);
+        const myMatrix = judgeLine.rotatesWithFather ? matrix.translate(x, y).rotate(-theta) : identity.translate(transformedX, transformedY).rotate(-theta).scale(ratio, -1);
         
         // Cache a matrix
-        judgeLine.renderMatrix = myMatrix;
+        judgeLine.renderMatrix = myMatrix.scale(1 / ratio, 1);
         if (judgeLine.children.size !== 0) {
             for (let line of judgeLine.children) {
                 this.precalculate(myMatrix, line, beats);
@@ -489,13 +490,16 @@ export class Player extends EventTarget {
      * @param beats 
      */
     calculateLineMatrix(judgeLine: JudgeLine, beats: number) {
+        return this._calculateLineMatrix(judgeLine, beats).scale(1 / this.widthRatio, 1);
+    }
+    _calculateLineMatrix(judgeLine: JudgeLine, beats: number) {
         const hw = this.canvas.width / 2;
         const x = judgeLine.getStackedValue("moveX", beats);
         const y = judgeLine.getStackedValue("moveY", beats);
         const theta = judgeLine.getStackedValue("rotate", beats) * Math.PI / 180;
         const father = judgeLine.father;
         if (!father) {
-            return identity.translate(x + hw, -y + 450).rotate(-theta).scale(1, -1);
+            return identity.translate(x + hw, -y + 450).rotate(-theta).scale(this.widthRatio, -1);
         } else if (judgeLine.rotatesWithFather) {
             const parentMatrix = this.calculateLineMatrix(father, beats);
             return parentMatrix.translate(x, y).rotate(-theta);
@@ -514,7 +518,7 @@ export class Player extends EventTarget {
         const myMatrix = judgeLine.renderMatrix;
         const transformedX = judgeLine.transformedX;
         const transformedY = judgeLine.transformedY;
-        context.setTransform(myMatrix);
+        context.setTransform(myMatrix/*.scale(1 / this.widthRatio, 1)*/);
 
 
 
@@ -838,7 +842,7 @@ export class Player extends EventTarget {
                 const posX = note.positionX * ratio;
                 const yo = note.yOffset * (note.above ? 1 : -1);
                 let intBeats = Math.floor(Math.min(beats, TC.toBeats(note.endTime)));
-                while (intBeats > startBeats) {
+                while (intBeats >= Math.max(startBeats, TC.toBeats(note.startTime))) {
                     const {x, y} = new Coordinate(posX, yo).mul(hitEffectNoFollows ? this.calculateLineMatrix(line, intBeats) : matrix);
                     const tintHE = note.tintHitEffects;
                     respack.hitDrawer(hitContext, x, y, HIT_EFFECT_SIZE, renderingTime - timeCalculator.toSeconds(intBeats), tintHE);
@@ -902,8 +906,7 @@ export class Player extends EventTarget {
         const context = this.context;
         const respack = this.respack;
         let zero = 0;
-        const ratio = this.widthRatio;
-        const positionX = note.positionX * ratio;
+        const positionX = note.positionX * this.widthRatio;
         
         if (note.yOffset) {
             positionY += note.yOffset;
