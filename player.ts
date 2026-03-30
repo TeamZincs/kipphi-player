@@ -18,7 +18,7 @@ import {
 /// #default
 import { AudioProcessor } from "./audio";
 /// #enddefault
-import { drawLine, innerProduct, rgba } from "./util";
+import { drawLine, innerProduct, rgb, rgba } from "./util";
 import { Coordinate, identity, Matrix33 } from "./matrix";
 import { drawNthFrame, Images } from "./image";
 import { type Vector } from "./util";
@@ -353,7 +353,8 @@ export class Player extends EventTarget {
         const renderingBeats = this.renderingBeats;
         
         // console.log("rendering")
-        const lineQueue = [...this.chart.judgeLines].sort((a, b) => (a.zOrder ?? 0) - (b.zOrder ?? 0));
+        const chart = this.chart;
+        const lineQueue = [...chart.judgeLines].sort((a, b) => (a.zOrder ?? 0) - (b.zOrder ?? 0));
         for (let line of this.chart.orphanLines) {
             this.precalculate(identity.translate(hw, 450).scale(this.widthRatio, -1), line, renderingBeats);
         }
@@ -378,12 +379,13 @@ export class Player extends EventTarget {
 
         if (this.showsInfo) {
             context.save()
-            const setTransform = (lineOrNull: JudgeLine | null) => {
+            const setTransformAndAlpha = (lineOrNull: JudgeLine | null) => {
                 if (!lineOrNull) {
                     context.setTransform(identity.translate(hw, 450));
                 } else {
                     context.setTransform(lineOrNull.renderMatrix);
-                    context.scale(1, -1)
+                    context.scale(1, -1);
+                    //context.globalAlpha = lineOrNull.alpha;
                 }
             }
             this.computeCombo(renderingBeats);
@@ -391,35 +393,33 @@ export class Player extends EventTarget {
             context.font = "32px phigros"
             context.textAlign = "left";
 
-
-            const chart = this.chart;
             const title = chart.name;
             const level = chart.level;
             const combo = this.currentCombo;
-            setTransform(chart.nameAttach)
+            setTransformAndAlpha(chart.nameAttach)
             context.fillText(title, -hw + 35, 420);
 
 
             context.textAlign = "right";
-            setTransform(chart.levelAttach)
+            setTransformAndAlpha(chart.levelAttach)
             context.fillText(level, hw - 35, 420);
 
             context.font = "40px phigros";
 
             const score = combo / chart.maxCombo * 100_0000;
             const text = score.toFixed(0).padStart(7, "0")
-            setTransform(chart.scoreAttach)
-            context.fillText(text, hw - 35, -390);
+            setTransformAndAlpha(chart.scoreAttach)
+            context.fillText(text, hw - 40, -392);
 
             if (combo >= 3) {
                 context.textAlign = "center";
                 
                 context.font = "64px phigros"
-                setTransform(chart.combonumberAttach)
+                setTransformAndAlpha(chart.combonumberAttach)
                 context.fillText(combo.toString(), 0, -384);
 
                 context.font = "24px phigros";
-                setTransform(chart.comboAttach)
+                setTransformAndAlpha(chart.comboAttach)
                 context.fillText(COMBO_TEXT, 0, -356);
 
 
@@ -531,6 +531,7 @@ export class Player extends EventTarget {
         context.scale(1, -1);
 
         const hasText = !!judgeLine.extendedLayer.text;
+        const hasUIAttached = judgeLine.hasAttachUI;
 
         if (hasText) {
             const textContent = judgeLine.extendedLayer.text.getValueAt(beats) as string;
@@ -545,23 +546,31 @@ export class Player extends EventTarget {
             const width = metrics.width;
             context.fillText(textContent, width * (anchor[0] - 0.5), height * (anchor[1] - 0.5));
             context.restore();
-        } else if (textureName === "line.png") {
-            const lineColor: RGB = judgeLine.extendedLayer.color?.getValueAt(beats) ?? [200, 200, 120];
-            context.fillStyle = rgba(...(this.greenLine === judgeLine.id ? ([100, 255, 100] as RGB) : lineColor), alpha / 255)
-            const scaledWidth = BASE_LINE_LENGTH * scaleX;
-            const scaledHeight = LINE_WIDTH * scaleY;
-            context.fillRect(-scaledWidth * anchor[0], -scaledHeight * anchor[1], scaledWidth, scaledHeight)
-            // Fixes #1 on "kipphiApparatusLegacy"
-        } else {
-            context.globalAlpha = alpha / 255;
-            const bitmap = this.textureMapping.get(textureName);
-            const width = bitmap.width;
-            const height = bitmap.height;
-            const scaledWidth = width * scaleX;
-            const scaledHeight = height * scaleY;
-            context.drawImage(this.textureMapping.get(textureName),
-                -scaledWidth * anchor[0], -scaledHeight * anchor[1], scaledWidth, scaledHeight)
-            context.globalAlpha = 1;
+        }
+        if (!hasText && !hasUIAttached) {
+            if (textureName === "line.png") {
+                const lineColor: RGB = judgeLine.extendedLayer.color?.getValueAt(beats) ?? [200, 200, 120];
+                context.fillStyle = rgba(...(this.greenLine === judgeLine.id ? ([100, 255, 100] as RGB) : lineColor), alpha / 255)
+                const scaledWidth = BASE_LINE_LENGTH * scaleX;
+                const scaledHeight = LINE_WIDTH * scaleY;
+                context.fillRect(-scaledWidth * anchor[0], -scaledHeight * anchor[1], scaledWidth, scaledHeight)
+                // Fixes #1 on "kipphiApparatusLegacy"
+            } else {
+                const lineColor: RGB = judgeLine.extendedLayer.color?.getValueAt(beats) ?? [255, 255, 255];
+                context.globalAlpha = alpha / 255;
+                const bitmap = this.textureMapping.get(textureName);
+                let texture: ProcessedTexture = bitmap;
+                if (lineColor.some(x => x !== 255)) {
+                    texture = this.tintLineTexture(bitmap, lineColor);
+                }
+                const width = bitmap.width;
+                const height = bitmap.height;
+                const scaledWidth = width * scaleX;
+                const scaledHeight = height * scaleY;
+                context.drawImage(texture,
+                    -scaledWidth * anchor[0], -scaledHeight * anchor[1], scaledWidth, scaledHeight)
+                context.globalAlpha = 1;
+            }
         }
 
         // Draw Anchor
@@ -948,6 +957,19 @@ export class Player extends EventTarget {
         context.restore()
         
     }
+    tintLineTexture(bitmap: ImageBitmap, color: RGB): OffscreenCanvas {
+        const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+        const context = canvas.getContext('2d');
+        context.drawImage(bitmap, 0, 0);
+        context.globalCompositeOperation = "source-in";
+        context.fillStyle = rgb(...color);
+        context.fillRect(0, 0, bitmap.width, bitmap.height);
+        context.globalCompositeOperation = "multiply";
+        context.drawImage(bitmap, 0, 0);
+        return canvas;
+    }
+    // #default
+
     // #default
     private update() {
         if (!this.playing) {
