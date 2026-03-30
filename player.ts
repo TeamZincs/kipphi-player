@@ -31,6 +31,8 @@ import { AudioProcessor } from "./audioProcessor";
 }
 */
 
+const HOLD_HE_SPEED = 2;
+const HOLD_HE_INTERVAL = 1 / HOLD_HE_SPEED;
 
 // 扩展JudgeLine，在上面缓存每帧的数据
 declare module "kipphi" {
@@ -400,22 +402,39 @@ export class Player extends EventTarget {
             const title = chart.name;
             const level = chart.level;
             const combo = this.currentCombo;
+
+            // name
             setTransformAndAlpha(chart.nameAttach)
             context.fillText(title, -hw + 35, 420);
 
-
+            // level
             context.textAlign = "right";
             setTransformAndAlpha(chart.levelAttach)
             context.fillText(level, hw - 35, 420);
 
             context.font = "40px phigros";
-
+            // score
             const score = combo / chart.maxCombo * 100_0000;
             const text = score.toFixed(0).padStart(7, "0")
             setTransformAndAlpha(chart.scoreAttach)
             context.fillText(text, hw - 40, -392);
 
-            if (combo >= 3) {
+            // pause
+            setTransformAndAlpha(chart.pauseAttach)
+            context.fillRect(-hw + 30, -418, 8, 30)
+            context.fillRect(-hw + 48, -418, 8, 30)
+
+            // bar
+            const progress = this.time / chart.duration;
+            const barWidth = progress * width;
+            setTransformAndAlpha(chart.barAttach)
+            context.fillStyle = "#aaa"
+            context.fillRect(-hw, -450, barWidth, 8)
+            context.fillStyle = "#fff"
+
+            context.fillRect(-hw + barWidth, -450, 2, 8)
+
+            if (combo >= 3) { // combo(number)
                 context.textAlign = "center";
                 
                 context.font = "64px phigros"
@@ -445,7 +464,7 @@ export class Player extends EventTarget {
             this.collectedFrameTime = 0;
         }
         context.textAlign = "left";
-        context.fillText(this.lastMeasuredFPSStr, 30, 20);
+        context.fillText(this.lastMeasuredFPSStr, 30, 25);
         context.textAlign = "center";
         context.fillText(this.time.toFixed(2) + " " + renderingBeats.toFixed(2), hw, 900)
         // #enddefault
@@ -841,7 +860,7 @@ export class Player extends EventTarget {
                     continue;
                 }
                 if (hitEffectNoFollows) {
-                    const endTimeSecs = timeCalculator.toSeconds(Math.floor(TC.toBeats(note.endTime)));
+                    const endTimeSecs = timeCalculator.toSeconds(Math.floor(TC.toBeats(note.endTime) * 2) / 2);
                     if (renderingTime > endTimeSecs + hitEffectDuration) {
                         continue;
                     }
@@ -850,12 +869,13 @@ export class Player extends EventTarget {
                 }
                 const posX = note.positionX * ratio;
                 const yo = note.yOffset * (note.above ? 1 : -1);
-                let intBeats = Math.floor(Math.min(beats, TC.toBeats(note.endTime)));
-                while (intBeats >= Math.max(startBeats, TC.toBeats(note.startTime))) {
-                    const {x, y} = new Coordinate(posX, yo).mul(hitEffectNoFollows ? this.calculateLineMatrix(line, intBeats) : matrix);
+                const noteStartBeats = TC.toBeats(note.startTime);
+                let beatsToRender = Math.floor((Math.min(beats, TC.toBeats(note.endTime)) - noteStartBeats - 0.01) * HOLD_HE_SPEED) / HOLD_HE_SPEED + noteStartBeats;
+                while (beatsToRender >= Math.max(startBeats, TC.toBeats(note.startTime))) {
+                    const {x, y} = new Coordinate(posX, yo).mul(hitEffectNoFollows ? this.calculateLineMatrix(line, beatsToRender) : matrix);
                     const tintHE = note.tintHitEffects;
-                    respack.hitDrawer(hitContext, x, y, HIT_EFFECT_SIZE, renderingTime - timeCalculator.toSeconds(intBeats), tintHE);
-                    intBeats--;
+                    respack.hitDrawer(hitContext, x, y, HIT_EFFECT_SIZE, renderingTime - timeCalculator.toSeconds(beatsToRender), tintHE);
+                    beatsToRender -= HOLD_HE_INTERVAL;
                 }
             }
             noteNode = <NoteNode>noteNode.next
