@@ -157,6 +157,7 @@ export class Respack {
         pack.holdCompact = meta.holdCompact;
         pack.hitFxFrames = meta.hitFx;
         pack.colorPerfect = meta.colorPerfect ?? 0xe1ffec9f;
+        pack.hitFxDuration = meta.hitFxDuration ?? 0.5;
 
         pack.HIT_FX = await Respack.loadImage(await readFile(`hit_fx.png`));
         pack.HIT_FX = await Respack.tintImage(pack.HIT_FX, pack.colorPerfect);

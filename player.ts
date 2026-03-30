@@ -385,7 +385,7 @@ export class Player extends EventTarget {
                 } else {
                     context.setTransform(lineOrNull.renderMatrix);
                     context.scale(1, -1);
-                    //context.globalAlpha = lineOrNull.alpha;
+                    context.globalAlpha = lineOrNull.alpha;
                 }
             }
             this.computeCombo(renderingBeats);
