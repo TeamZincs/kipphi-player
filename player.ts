@@ -115,7 +115,8 @@ export class Player extends EventTarget {
     // #default
     lastRenderingRealTime: number = 0;
     renderedFrames: number = 0;
-    lastMeasuredFPSStr: string = "N/A";
+    lastMeasuredFPSStr: string = "N/A (N/A)";
+    collectedFrameTime: number = 0;
     // #enddefault
     showsInfo = true;
     showsLineID = false;
@@ -321,6 +322,9 @@ export class Player extends EventTarget {
         if (!ENABLE_PLAYER) {
             return;
         }
+        // #default
+        const start = performance.now();
+        // #enddefault
         // console.time("render")
         const context = this.context;
 
@@ -427,17 +431,22 @@ export class Player extends EventTarget {
             context.restore();
         }
         context.resetTransform();
-        context.textAlign = "center";
+        // #default
         context.font = "20px phigros";
         context.fillStyle = "#ddd";
-        // #default
         const now = performance.now();
-        if (++this.renderedFrames >= 40) {
-            this.renderedFrames = 0;
-            this.lastMeasuredFPSStr = (40000 / (now - this.lastRenderingRealTime)).toFixed(1);
+        this.renderedFrames++;
+        this.collectedFrameTime += now - start;
+        if (now - this.lastRenderingRealTime >= 1000) {
+            const averageFrameTime = this.collectedFrameTime / this.renderedFrames;
+            this.lastMeasuredFPSStr = (this.renderedFrames * 1000 / (now - this.lastRenderingRealTime)).toFixed(1) + ` (${averageFrameTime.toFixed(1)}ms)`;
             this.lastRenderingRealTime = now;
+            this.renderedFrames = 0;
+            this.collectedFrameTime = 0;
         }
+        context.textAlign = "left";
         context.fillText(this.lastMeasuredFPSStr, 30, 20);
+        context.textAlign = "center";
         context.fillText(this.time.toFixed(2) + " " + renderingBeats.toFixed(2), hw, 900)
         // #enddefault
 
