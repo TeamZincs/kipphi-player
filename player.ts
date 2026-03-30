@@ -515,7 +515,7 @@ export class Player extends EventTarget {
         } else {
             const parentMatrix = this.calculateLineMatrix(father, beats);
             const {x: tx, y: ty} = new Coordinate(x, y).mul(parentMatrix);
-            return identity.translate(tx, ty).rotate(-theta).scale(1, -1);
+            return identity.translate(tx, ty).rotate(-theta).scale(this.widthRatio, -1);
         }
     }
     renderLine(judgeLine: JudgeLine, beats: number) {
