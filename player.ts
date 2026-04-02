@@ -990,7 +990,7 @@ export class Player extends EventTarget {
                 this.renderNote(
                     note,
                     chord,
-                    startY < 0 ? 0 : startY,
+                    startY,
                     beats,
                     cover,
                     judgeLine.getRelativeFloorPositionAt(TC.toBeats(note.endTime), timeCalculator) * note.speed
@@ -1023,7 +1023,8 @@ export class Player extends EventTarget {
         if (TC.toBeats(note.startTime) - note.visibleBeats > beats) {
             return;
         }
-        if (positionY < 0 && cover) {
+        const isJudging = TC.toBeats(note.startTime) <= beats
+        if (positionY < 0 && cover && !isJudging) {
             return;
         }
         const context = this.context;
@@ -1054,7 +1055,6 @@ export class Player extends EventTarget {
             context.globalAlpha = note.alpha / 255;
         }
         if (note.type === NoteType.hold) {
-            const isJudging = TC.toBeats(note.startTime) <= beats
             positionY = isJudging ? zero : positionY;
             length = isJudging ? (endpositionY - zero) : length;
             length = -length
