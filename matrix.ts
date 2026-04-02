@@ -30,6 +30,12 @@ export class Matrix33 {
         const {a, b, c, d, e, f} = this;
         return new Matrix33(a, b, c, d, a * x + c * y + e, b * x + d * y + f);
     }
+    transform(matrix: Matrix33) {
+        const {a, b, c, d, e, f} = this;
+        return new Matrix33(a * matrix.a + c * matrix.b, b * matrix.a + d * matrix.b,
+                          a * matrix.c + c * matrix.d, b * matrix.c + d * matrix.d,
+                          a * matrix.e + c * matrix.f + e, b * matrix.e + d * matrix.f + f);
+    }
     scale(x: number, y: number) {
         const {a, b, c, d, e, f} = this;
         return new Matrix33(a * x, b * y, c * x, d * y, e, f);

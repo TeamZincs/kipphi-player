@@ -51,11 +51,8 @@ declare module "kipphi" {
 const ENABLE_PLAYER = true;
 const DRAWS_NOTES = true;
 
-const DEFAULT_ASPECT_RATIO = 3 / 2
 const LINE_WIDTH = 6.75;
-const LINE_COLOR = "#CCCC77";
 const HIT_EFFECT_SIZE = 200;
-const HALF_HIT = HIT_EFFECT_SIZE / 2
 
 // 以原点为中心，渲染的半径
 const RENDER_SCOPE = 1000;
@@ -73,8 +70,8 @@ CURVE_NODE_PATH.lineTo(0, -14);
 CURVE_NODE_PATH.closePath();
 
 const STANDARD_WIDTH =  1350;
+const STANDARD_HEIGHT = 900;
 const BASE_LINE_LENGTH = 4050;
-const HIT_FX_SIZE = 1024;
 const getVector = (theta: number): [Vector, Vector] => [[Math.cos(theta), Math.sin(theta)], [-Math.sin(theta), Math.cos(theta)]]
 type HEX = number;
 
@@ -153,6 +150,10 @@ export class Player extends EventTarget {
 
     
     textureMapping: Map<string, ImageBitmap> = new Map();
+
+    rootMatrix: Matrix33;
+    baseMatrix: Matrix33;
+    ratio: number;
     
     constructor(
         canvas: HTMLCanvasElement,
@@ -161,7 +162,8 @@ export class Player extends EventTarget {
         audio: HTMLAudioElement,
         // #enddefault
         background: ImageBitmap,
-        public respack: Respack
+        public respack: Respack,
+        public width: number = canvas.width / canvas.height * STANDARD_HEIGHT
     ) {
         super();
         this.canvas = canvas
@@ -177,8 +179,11 @@ export class Player extends EventTarget {
         this.playing = false;
         this.noteSize = NOTE_WIDTH;
         this.noteHeight = NOTE_HEIGHT;
-        this.widthRatio = canvas.width === STANDARD_WIDTH ? 1 : canvas.width / STANDARD_WIDTH;
-        this.initCoordinate();
+        this.widthRatio = width === STANDARD_WIDTH ? 1 : width / STANDARD_WIDTH;
+        const ratio = this.ratio = canvas.height / STANDARD_HEIGHT
+        this.rootMatrix = this.baseMatrix = identity.scale(ratio, ratio);
+        this.hitCanvas.height = canvas.height;
+        this.hitCanvas.width = canvas.width;
         // #default
         this.audio = audio;
         this.audio.addEventListener("ended", () => {
@@ -221,29 +226,6 @@ export class Player extends EventTarget {
         return this.time + this.renderingOffset * this.playbackRate;
         } */
     }
-    initCoordinate() {
-        let {canvas, context, hitCanvas, hitContext} = this;
-        
-        // console.log(context.getTransform())
-        const height = 900;
-        const width = this.canvas.width;
-        canvas.height = height;
-        canvas.width = width;
-        hitCanvas.height = height;
-        hitCanvas.width = width
-        
-        const RATIO = 1.0
-        // 计算最终的变换矩阵
-        const tx = width / 2;
-        const ty = height / 2;
-
-        // 设置变换矩阵
-        context.setTransform(RATIO, 0, 0, RATIO, tx, ty);
-        //hitContext.scale(0.5, 0.5)
-        context.save()
-        hitContext.save()
-        // console.log(context.getTransform())
-    }
     _blurringRadius: number = 50;
 
     get blurringRadius() {
@@ -262,6 +244,16 @@ export class Player extends EventTarget {
             this.blurredBackground = img;
         })
     }
+    _cameraRatio = 1;
+    set cameraRatio(ratio: number) { 
+        this._cameraRatio = ratio;
+        const hw = this.width / 2;
+        const hh = STANDARD_HEIGHT / 2;
+        this.baseMatrix = identity.scale(this.ratio, this.ratio)
+            .translate(hw * (1 - ratio), hh * (1 - ratio))
+            .scale(ratio, ratio)
+    }
+    get cameraRatio() { return this._cameraRatio; }
 
     /**
      * 计算当前combo。
@@ -341,11 +333,13 @@ export class Player extends EventTarget {
         // console.time("render")
         const context = this.context;
 
-        const width = this.canvas.width;
-        const hw = width / 2
-        context.setTransform(1, 0, 0, 1, hw, 450);
+        const width = this.width;
+        const hw = width / 2;
+        context.setTransform(this.baseMatrix)
+        context.transform(1, 0, 0, 1, hw, 450);
         context.save();
         const hitContext = this.hitContext;
+        hitContext.setTransform(this.rootMatrix);
         hitContext.clearRect(0, 0, width, 900);
         // 虽然还要加个图片，但是如果不clear，在Node环境下，会泄漏很多内存
         context.clearRect(-width, -900, width * 2, 1800);
@@ -369,6 +363,7 @@ export class Player extends EventTarget {
         context.restore();
         const renderingBeats = this.renderingBeats;
         const renderingTime = this.renderingTime;
+
         
         // console.log("rendering")
         const chart = this.chart;
@@ -389,7 +384,7 @@ export class Player extends EventTarget {
         hitContext.lineWidth = 5;
         // drawLine(hitContext, 0, 900, 1350, 0);
         
-        context.setTransform(1, 0, 0, 1, 0, 0);
+        context.setTransform(this.baseMatrix);
         context.drawImage(this.hitCanvas, 0, 0, width, 900)
         context.restore()
 
@@ -403,9 +398,9 @@ export class Player extends EventTarget {
             context.save()
             const setTransformAndAlpha = (lineOrNull: JudgeLine | null) => {
                 if (!lineOrNull) {
-                    context.setTransform(identity.translate(hw, 450));
+                    context.setTransform(this.baseMatrix.translate(hw, 450));
                 } else {
-                    context.setTransform(lineOrNull.renderMatrix);
+                    context.setTransform(this.baseMatrix.transform(lineOrNull.renderMatrix));
                     context.scale(1, -1);
                     context.globalAlpha = lineOrNull.alpha;
                 }
@@ -465,7 +460,7 @@ export class Player extends EventTarget {
             }
             context.restore();
         }
-        context.resetTransform();
+        context.setTransform(this.baseMatrix);
         // #default
         context.font = "20px phigros";
         context.fillStyle = "#ddd";
@@ -548,7 +543,7 @@ export class Player extends EventTarget {
         return this._calculateLineMatrix(judgeLine, beats, seconds).scale(1 / this.widthRatio, 1);
     }
     _calculateLineMatrix(judgeLine: JudgeLine, beats: number, seconds: number) {
-        const hw = this.canvas.width / 2;
+        const hw = this.width / 2;
         const x = judgeLine.getStackedValue("moveX", beats);
         const y = judgeLine.getStackedValue("moveY", beats);
         const theta = judgeLine.getStackedValue("rotate", beats) * Math.PI / 180;
@@ -603,7 +598,7 @@ export class Player extends EventTarget {
         for (let i = 0; i < frames; i++) {
             const secs = startSecs + i / curveFPS;
             const matrix = this.calculateLineMatrix(line, secs, true);
-            context.setTransform(matrix);
+            context.setTransform(this.baseMatrix.transform(matrix));
             context.fillStyle = `hsl(${i / frames * 360}, 100%, 50%)`;
             context.fill(CURVE_NODE_PATH);
         }
@@ -613,7 +608,7 @@ export class Player extends EventTarget {
         const context = this.context;
         const map = this.map;
         context.save();
-        context.resetTransform();
+        context.setTransform(this.baseMatrix);
         context.font = "30px phigros"
         for (const [_, lines] of map) {
             const x = lines[0].transformedX;
@@ -645,7 +640,7 @@ export class Player extends EventTarget {
         const myMatrix = judgeLine.renderMatrix;
         const transformedX = judgeLine.transformedX;
         const transformedY = judgeLine.transformedY;
-        context.setTransform(myMatrix/*.scale(1 / this.widthRatio, 1)*/);
+        context.setTransform(this.baseMatrix.transform(myMatrix)/*.scale(1 / this.widthRatio, 1)*/);
 
 
 
