@@ -26,7 +26,7 @@ import { NOTE_HEIGHT, NOTE_WIDTH } from "./constants";
 import type { Respack } from "./respack";
 /*
 #node {
-import { Canvas, type CanvasRenderingContext2D, type Image, type ImageData } from "skia-canvas";
+import { Canvas, type CanvasRenderingContext2D, type Image, type ImageData, Path2D } from "skia-canvas";
 import { AudioProcessor } from "./audioProcessor";
 }
 */
@@ -329,11 +329,13 @@ export class Player extends EventTarget {
         }
         this.currentCombo = combo;
     }
+    private map: Map<string, JudgeLine[]>; 
     render() {
         if (!ENABLE_PLAYER) {
             return;
         }
         // #default
+        this.map = new Map();
         const start = performance.now();
         // #enddefault
         // console.time("render")
@@ -394,7 +396,9 @@ export class Player extends EventTarget {
         if (this.showsLineCurve) {
             this.renderLineCurve(renderingBeats);
         }
-
+        if (this.showsLineID) {
+            this.renderLineIDs();
+        }
         if (this.showsInfo) {
             context.save()
             const setTransformAndAlpha = (lineOrNull: JudgeLine | null) => {
@@ -510,6 +514,15 @@ export class Player extends EventTarget {
         const ratio = this.widthRatio;
         judgeLine.transformedX = transformedX;
         judgeLine.transformedY = transformedY;
+        if (this.showsLineID) {
+            const map = this.map;
+            const k = Math.round(transformedX) + "," + Math.round(transformedY);
+            if (map.has(k)) {
+                map.get(k)!.push(judgeLine);
+            } else {
+                map.set(k, [judgeLine]);
+            }
+        }
         const myMatrix = judgeLine.rotatesWithFather ? matrix.translate(x, y).rotate(-theta) : identity.translate(transformedX, transformedY).rotate(-theta).scale(ratio, -1);
         
         // Cache a matrix
@@ -596,6 +609,33 @@ export class Player extends EventTarget {
         }
         context.restore();
     }
+    renderLineIDs() {
+        const context = this.context;
+        const map = this.map;
+        context.save();
+        context.resetTransform();
+        context.font = "30px phigros"
+        for (const [_, lines] of map) {
+            const x = lines[0].transformedX;
+            const y = lines[0].transformedY;
+            const ids = lines.map(line => line.id);
+            ids.sort((a, b) => a - b);
+            const len = ids.length;
+            const segs: string[] = [];
+            let prev = ids[0];
+            let starting = prev;
+            for (let i = 1; i < len; i++) {
+                const cur = ids[i];
+                if (cur !== prev + 1) {
+                    segs.push(prev === starting ? starting.toString() : `${starting}~${prev}`);
+                    starting = cur;
+                }
+                prev = cur;
+            }
+            segs.push(prev === starting ? prev.toString() : `${starting}~${prev}`);
+            context.fillText(segs.join(", "), x, y + 40);
+        }
+    }
     renderLine(judgeLine: JudgeLine, beats: number, seconds: number) {
         const context = this.context;
         const respack = this.respack;
@@ -669,14 +709,14 @@ export class Player extends EventTarget {
         // #default
         context.drawImage(Images.ANCHOR, -10, -10);
         // #enddefault
-        if (this.showsLineID) {
-            context.save();
-            context.fillStyle = "white";
-            context.font = "40px phigros";
+        // if (this.showsLineID) {
+        //     context.save();
+        //     context.fillStyle = "white";
+        //     context.font = "40px phigros";
                 
-            context.fillText(`#${judgeLine.id} ${judgeLine.name.toLowerCase() === "untitled" ? "" : judgeLine.name}`, 10, 50);
-            context.restore();
-        }
+        //     context.fillText(`#${judgeLine.id} ${judgeLine.name.toLowerCase() === "untitled" ? "" : judgeLine.name}`, 10, 50);
+        //     context.restore();
+        // }
 
         judgeLine.computeCurrentFloorPosition(beats, timeCalculator);
 
