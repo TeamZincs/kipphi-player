@@ -108,6 +108,7 @@ export class Player extends EventTarget {
     blurredBackground: ProcessedTexture;
     noteSize: number;
     noteHeight: number;
+    hitEffectSize: number;
     // soundQueue: SoundEntity[];
     lastBeats: number;
     lastRenderingBeats: number;
@@ -179,6 +180,7 @@ export class Player extends EventTarget {
         this.playing = false;
         this.noteSize = NOTE_WIDTH;
         this.noteHeight = NOTE_HEIGHT;
+        this.hitEffectSize = this.noteSize * 1.576;
         this.widthRatio = width === STANDARD_WIDTH ? 1 : width / STANDARD_WIDTH;
         const ratio = this.ratio = canvas.height / STANDARD_HEIGHT
         this.rootMatrix = this.baseMatrix = identity.scale(ratio, ratio);
@@ -899,6 +901,7 @@ export class Player extends EventTarget {
         // console.log(hitContext.getTransform())
         const end = tree.getNodeAt(endBeats);
         const ratio = this.widthRatio;
+        const heSize = this.hitEffectSize;
         if (noteNode.type === NodeType.TAIL) {
             return;
         }
@@ -916,7 +919,7 @@ export class Player extends EventTarget {
                 const {x, y} = new Coordinate(posX, yo).mul(hitEffectNoFollows ? this.calculateLineMatrix(line, beats) : matrix);
                 // console.log("he", x, y);
                 const he = note.tintHitEffects;
-                respack.hitDrawer(hitContext, x, y, HIT_EFFECT_SIZE, renderingTime - timeCalculator.toSeconds(beats), he)
+                respack.hitDrawer(hitContext, x, y, heSize, renderingTime - timeCalculator.toSeconds(beats), he)
             }
 
             noteNode = <NoteNode>noteNode.next
@@ -940,6 +943,7 @@ export class Player extends EventTarget {
         const end = tree.getNodeAt(endBeats);
         const hitEffectDuration = respack.hitFxDuration;
         const ratio = this.widthRatio;
+        const heSize = this.hitEffectSize;
         if (noteNode.type === NodeType.TAIL) {
             return;
         }
@@ -968,7 +972,7 @@ export class Player extends EventTarget {
                 while (beatsToRender >= Math.max(startBeats, TC.toBeats(note.startTime))) {
                     const {x, y} = new Coordinate(posX, yo).mul(hitEffectNoFollows ? this.calculateLineMatrix(line, beatsToRender) : matrix);
                     const tintHE = note.tintHitEffects;
-                    respack.hitDrawer(hitContext, x, y, HIT_EFFECT_SIZE, renderingTime - timeCalculator.toSeconds(beatsToRender), tintHE);
+                    respack.hitDrawer(hitContext, x, y, heSize, renderingTime - timeCalculator.toSeconds(beatsToRender), tintHE);
                     beatsToRender -= HOLD_HE_INTERVAL;
                 }
             }
