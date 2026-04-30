@@ -147,7 +147,7 @@ export class Player extends EventTarget {
      */
     hitEffectNoFollows = !__IS_BROWSER;
 
-    readonly widthRatio: number;
+    heightRatio: number;
 
     
     textureMapping: Map<string, ImageBitmap> = new Map();
@@ -156,6 +156,9 @@ export class Player extends EventTarget {
     baseMatrix: Matrix33;
     ratio: number;
     
+
+    public height: number;
+
     constructor(
         canvas: HTMLCanvasElement,
         audioProcessor: AudioProcessor,
@@ -163,8 +166,7 @@ export class Player extends EventTarget {
         audio: HTMLAudioElement,
         // #enddefault
         background: ImageBitmap,
-        public respack: Respack,
-        public width: number = canvas.width / canvas.height * STANDARD_HEIGHT
+        public respack: Respack
     ) {
         super();
         this.canvas = canvas
@@ -176,22 +178,27 @@ export class Player extends EventTarget {
 
         this.blurringRadius = 50;
 
+        this.useNewAspect();
 
         this.playing = false;
         this.noteSize = NOTE_WIDTH;
         this.noteHeight = NOTE_HEIGHT;
-        this.hitEffectSize = this.noteSize * 1.576;
-        this.widthRatio = width === STANDARD_WIDTH ? 1 : width / STANDARD_WIDTH;
-        const ratio = this.ratio = canvas.height / STANDARD_HEIGHT
-        this.rootMatrix = this.baseMatrix = identity.scale(ratio, ratio);
-        this.hitCanvas.height = canvas.height;
-        this.hitCanvas.width = canvas.width;
+        this.hitEffectSize = this.noteSize * 1.3;
         // #default
         this.audio = audio;
         this.audio.addEventListener("ended", () => {
             this.playing = false;
         })
         // #enddefault
+    }
+    useNewAspect() {
+        const canvas = this.canvas;
+        const height = this.height = canvas.height / canvas.width * STANDARD_WIDTH;
+        this.heightRatio = height === STANDARD_HEIGHT ? 1 : height / STANDARD_HEIGHT;
+        const ratio = this.ratio = canvas.width / STANDARD_WIDTH
+        this.rootMatrix = this.baseMatrix = identity.scale(ratio, ratio);
+        this.hitCanvas.height = canvas.height;
+        this.hitCanvas.width = canvas.width;
     }
     override addEventListener(type: "drawn" | "play" | "pause", listener: (e: Event) => void, options?: EventListenerOptions): void {
         super.addEventListener(type, listener, options);
@@ -249,8 +256,8 @@ export class Player extends EventTarget {
     _cameraRatio = 1;
     set cameraRatio(ratio: number) { 
         this._cameraRatio = ratio;
-        const hw = this.width / 2;
-        const hh = STANDARD_HEIGHT / 2;
+        const hw = STANDARD_WIDTH / 2;
+        const hh = this.height / 2;
         this.baseMatrix = identity.scale(this.ratio, this.ratio)
             .translate(hw * (1 - ratio), hh * (1 - ratio))
             .scale(ratio, ratio)
@@ -335,17 +342,17 @@ export class Player extends EventTarget {
         // console.time("render")
         const context = this.context;
 
-        const width = this.width;
-        const hw = width / 2;
+        const height = this.height;
+        const hh = height / 2;
         context.setTransform(this.baseMatrix)
-        context.transform(1, 0, 0, 1, hw, 450);
+        context.transform(1, 0, 0, 1, STANDARD_WIDTH / 2, hh);
         context.save();
         const hitContext = this.hitContext;
         hitContext.setTransform(this.rootMatrix);
-        hitContext.clearRect(0, 0, width, 900);
+        hitContext.clearRect(0, 0, STANDARD_WIDTH, height);
         // 虽然还要加个图片，但是如果不clear，在Node环境下，会泄漏很多内存
-        context.clearRect(-width, -900, width * 2, 1800);
-        context.drawImage(this.blurredBackground, -hw, -450, width, 900);
+        context.clearRect(STANDARD_WIDTH, -height, STANDARD_WIDTH * 2, height * 2);
+        context.drawImage(this.blurredBackground, -STANDARD_WIDTH / 2, -hh, STANDARD_WIDTH, height);
         // 涂灰色（背景变暗）
         context.fillStyle = "#0008";
         context.fillRect(-27000, -18000, 54000, 36000)
@@ -371,7 +378,7 @@ export class Player extends EventTarget {
         const chart = this.chart;
         const lineQueue = [...chart.judgeLines].sort((a, b) => (a.zOrder ?? 0) - (b.zOrder ?? 0));
         for (let line of this.chart.orphanLines) {
-            this.precalculate(identity.translate(hw, 450).scale(this.widthRatio, -1), line, renderingBeats, renderingTime);
+            this.precalculate(identity.translate(STANDARD_WIDTH / 2, hh).scale(1, -this.heightRatio), line, renderingBeats, renderingTime);
         }
         for (let line of lineQueue) {
             if (line.optimized) {
@@ -387,7 +394,7 @@ export class Player extends EventTarget {
         // drawLine(hitContext, 0, 900, 1350, 0);
         
         context.setTransform(this.baseMatrix);
-        context.drawImage(this.hitCanvas, 0, 0, width, 900)
+        context.drawImage(this.hitCanvas, 0, 0, STANDARD_WIDTH, height);
         context.restore()
 
         if (this.showsLineCurve) {
@@ -398,11 +405,11 @@ export class Player extends EventTarget {
         }
         if (this.showsInfo) {
             context.save()
-            const setTransformAndAlpha = (lineOrNull: JudgeLine | null) => {
+            const setTransformAndAlpha = (lineOrNull: JudgeLine | null, transform: Matrix33 = identity) => {
                 if (!lineOrNull) {
-                    context.setTransform(this.baseMatrix.translate(hw, 450));
+                    context.setTransform(this.baseMatrix.transform(transform).translate(STANDARD_WIDTH / 2, hh));
                 } else {
-                    context.setTransform(this.baseMatrix.transform(lineOrNull.renderMatrix));
+                    context.setTransform(this.baseMatrix.transform(transform).transform(lineOrNull.renderMatrix));
                     context.scale(1, -1);
                     context.globalAlpha = lineOrNull.alpha;
                 }
@@ -415,48 +422,51 @@ export class Player extends EventTarget {
             const title = chart.name;
             const level = chart.level;
             const combo = this.currentCombo;
+            const hw = STANDARD_WIDTH / 2;
 
             // name
-            setTransformAndAlpha(chart.nameAttach)
-            context.fillText(title, -hw + 35, 420);
+            setTransformAndAlpha(chart.nameAttach, identity.translate(-hw + 43, hh - 34))
+            context.fillText(title, 0, 0);
 
             // level
             context.textAlign = "right";
-            setTransformAndAlpha(chart.levelAttach)
-            context.fillText(level, hw - 35, 420);
+            setTransformAndAlpha(chart.levelAttach, identity.translate(hw - 43, hh - 34))
+            context.fillText(level, 0, 0);
 
             context.font = "40px phigros";
             // score
             const score = combo / chart.maxCombo * 100_0000;
             const text = score.toFixed(0).padStart(7, "0")
-            setTransformAndAlpha(chart.scoreAttach)
-            context.fillText(text, hw - 40, -392);
+            context.textBaseline = "top";
+            setTransformAndAlpha(chart.scoreAttach, identity.translate(hw - 39, -hh + 30))
+            context.fillText(text, 0, 0);
 
             // pause
-            setTransformAndAlpha(chart.pauseAttach)
-            context.fillRect(-hw + 30, -418, 8, 30)
-            context.fillRect(-hw + 48, -418, 8, 30)
+            setTransformAndAlpha(chart.pauseAttach, identity.translate(-hw + 39, -hh + 30))
+            context.fillRect(0, 2, 8, 30)
+            context.fillRect(16, 2, 8, 30)
 
             // bar
             const progress = this.time / chart.duration;
-            const barWidth = progress * width;
-            setTransformAndAlpha(chart.barAttach)
+            const barWidth = progress * STANDARD_WIDTH;
+            setTransformAndAlpha(chart.barAttach, identity.translate(-hw, -hh));
             context.fillStyle = "#aaa"
-            context.fillRect(-hw, -450, barWidth, 8)
+            context.fillRect(0, 0, barWidth, 8)
             context.fillStyle = "#fff"
 
-            context.fillRect(-hw + barWidth, -450, 2, 8)
+            context.fillRect(barWidth, 0, 2, 8)
 
             if (combo >= 3) { // combo(number)
                 context.textAlign = "center";
+                context.textBaseline = "alphabetic";
                 
                 context.font = "64px phigros"
-                setTransformAndAlpha(chart.combonumberAttach)
-                context.fillText(combo.toString(), 0, -384);
+                setTransformAndAlpha(chart.combonumberAttach, identity.translate(0, -hh + 50))
+                context.fillText(combo.toString(), 0, 20);
 
                 context.font = "24px phigros";
-                setTransformAndAlpha(chart.comboAttach)
-                context.fillText(COMBO_TEXT, 0, -356);
+                setTransformAndAlpha(chart.comboAttach, identity.translate(0, -hh + 95))
+                context.fillText(COMBO_TEXT, 0, 0);
 
 
             }
@@ -479,7 +489,7 @@ export class Player extends EventTarget {
         context.textAlign = "left";
         context.fillText(this.lastMeasuredFPSStr, 30, 25);
         context.textAlign = "center";
-        context.fillText(this.time.toFixed(2) + " " + renderingBeats.toFixed(2), hw, 900)
+        context.fillText(this.time.toFixed(2) + " " + renderingBeats.toFixed(2), STANDARD_WIDTH / 2, height)
         // #enddefault
 
         this.dispatchEvent(new Event("drawn"));
@@ -508,7 +518,7 @@ export class Player extends EventTarget {
         const {x: transformedX, y: transformedY} = new Coordinate(x, y).mul(matrix);
 
         
-        const ratio = this.widthRatio;
+        const ratio = this.heightRatio;
         judgeLine.transformedX = transformedX;
         judgeLine.transformedY = transformedY;
         if (this.showsLineID) {
@@ -520,10 +530,10 @@ export class Player extends EventTarget {
                 map.set(k, [judgeLine]);
             }
         }
-        const myMatrix = judgeLine.rotatesWithFather ? matrix.translate(x, y).rotate(-theta) : identity.translate(transformedX, transformedY).rotate(-theta).scale(ratio, -1);
-        
+        const myMatrix = judgeLine.rotatesWithFather ? matrix.translate(x, y).rotate(-theta).scale(1, ratio) : identity.translate(transformedX, transformedY).scale(1, -1).rotate(-theta).scale(1, ratio);
+        //console.log( judgeLine.id, transformedX, transformedY, matrix)
         // Cache a matrix
-        judgeLine.renderMatrix = myMatrix.scale(1 / ratio, 1);
+        judgeLine.renderMatrix = myMatrix.scale(1, 1 / ratio);
         if (judgeLine.children.size !== 0) {
             for (let line of judgeLine.children) {
                 this.precalculate(myMatrix, line, beats, seconds);
@@ -542,20 +552,22 @@ export class Player extends EventTarget {
     calculateLineMatrix(judgeLine: JudgeLine, beatsOrSeconds: number, useSeconds: boolean = false) {
         const seconds = useSeconds ? beatsOrSeconds : this.chart.timeCalculator.toSeconds(beatsOrSeconds);
         const beats = useSeconds ? this.chart.timeCalculator.secondsToBeats(seconds) : beatsOrSeconds;
-        return this._calculateLineMatrix(judgeLine, beats, seconds).scale(1 / this.widthRatio, 1);
+        return this._calculateLineMatrix(judgeLine, beats, seconds).scale(1, 1 / this.heightRatio);
     }
     _calculateLineMatrix(judgeLine: JudgeLine, beats: number, seconds: number) {
-        const hw = this.width / 2;
+        const hw = STANDARD_WIDTH / 2;
+        const hh = this.height / 2;
+        const ratio = this.heightRatio;
         const x = judgeLine.getStackedValue("moveX", beats);
         const y = judgeLine.getStackedValue("moveY", beats);
         const theta = judgeLine.getStackedValue("rotate", beats) * Math.PI / 180;
         const father = judgeLine.father;
-        const parentMatrix = father ? this._calculateLineMatrix(father, beats, seconds) : identity.translate(hw, 450).scale(this.widthRatio, -1);
+        const parentMatrix = father ? this._calculateLineMatrix(father, beats, seconds) : identity.translate(hw, hh).scale(1, -ratio);
         if (judgeLine.rotatesWithFather) {
-            return parentMatrix.translate(x, y).rotate(-theta);
+            return parentMatrix.translate(x, y).rotate(-theta).scale(1, ratio);
         } else {
             const {x: tx, y: ty} = new Coordinate(x, y).mul(parentMatrix);
-            return identity.translate(tx, ty).rotate(-theta).scale(this.widthRatio, -1);
+            return identity.translate(tx, ty).scale(1, -1).rotate(-theta).scale(1, ratio);
         }
     }
     renderLineCurve(beats: number) {
@@ -900,7 +912,6 @@ export class Player extends EventTarget {
         const line = tree.parentLine
         // console.log(hitContext.getTransform())
         const end = tree.getNodeAt(endBeats);
-        const ratio = this.widthRatio;
         const heSize = this.hitEffectSize;
         if (noteNode.type === NodeType.TAIL) {
             return;
@@ -914,7 +925,7 @@ export class Player extends EventTarget {
                 if (note.isFake) {
                     continue;
                 }
-                const posX = note.positionX * ratio;
+                const posX = note.positionX;
                 const yo = note.yOffset * (note.above ? 1 : -1);
                 const {x, y} = new Coordinate(posX, yo).mul(hitEffectNoFollows ? this.calculateLineMatrix(line, beats) : matrix);
                 // console.log("he", x, y);
@@ -942,7 +953,6 @@ export class Player extends EventTarget {
         let noteNode = start;
         const end = tree.getNodeAt(endBeats);
         const hitEffectDuration = respack.hitFxDuration;
-        const ratio = this.widthRatio;
         const heSize = this.hitEffectSize;
         if (noteNode.type === NodeType.TAIL) {
             return;
@@ -965,7 +975,7 @@ export class Player extends EventTarget {
                 } else if (startBeats > TC.toBeats(note.endTime)) {
                     continue;
                 }
-                const posX = note.positionX * ratio;
+                const posX = note.positionX;
                 const yo = note.yOffset * (note.above ? 1 : -1);
                 const noteStartBeats = TC.toBeats(note.startTime);
                 let beatsToRender = Math.floor((Math.min(beats, TC.toBeats(note.endTime)) - noteStartBeats - 0.01) * HOLD_HE_SPEED) / HOLD_HE_SPEED + noteStartBeats;
@@ -1031,10 +1041,11 @@ export class Player extends EventTarget {
         if (positionY < 0 && cover && !isJudging) {
             return;
         }
+        const ratio = this.heightRatio;
         const context = this.context;
         const respack = this.respack;
         let zero = 0;
-        const positionX = note.positionX * this.widthRatio;
+        const positionX = note.positionX;
         
         if (note.yOffset) {
             positionY += note.yOffset;
@@ -1065,23 +1076,23 @@ export class Player extends EventTarget {
             const HOLD_BODY = chord ? respack.HOLD_BODY_HL : respack.HOLD_BODY;
             const HOLD_HEAD = chord ? respack.HOLD_HEAD_HL : respack.HOLD_HEAD;
             const HOLD_TAIL = chord ? respack.HOLD_TAIL_HL : respack.HOLD_TAIL;
-            context.drawImage(HOLD_BODY, positionX - half, positionY - length, size, length);
+            context.drawImage(HOLD_BODY, positionX - half, (positionY - length) * ratio, size, length * ratio);
             if (!isJudging || respack.holdKeepHead) {
                 const h = size * (HOLD_HEAD.height / HOLD_HEAD.width)
-                context.drawImage(HOLD_HEAD, positionX - half, positionY - (respack.holdCompact ? h / 2 : 0),
+                context.drawImage(HOLD_HEAD, positionX - half, (positionY * ratio - (respack.holdCompact ? h / 2 : 0)) ,
                     size, h);
             }
             const tailHeight = size * (HOLD_TAIL.height / HOLD_TAIL.width)
-            context.drawImage(HOLD_TAIL, positionX - half, positionY - length - (respack.holdCompact ? tailHeight / 2 : tailHeight),
+            context.drawImage(HOLD_TAIL, positionX - half, (positionY - length) * ratio - (respack.holdCompact ? tailHeight / 2 : tailHeight),
                 size, tailHeight);
         } else {
-            respack.noteDrawer(context, positionX, positionY, size, this.noteSize, note.type, chord, note.tint);
+            respack.noteDrawer(context, positionX, positionY * ratio, size, this.noteSize, note.type, chord, note.tint);
         }
         
         // 不再使用叠加的方法
         // #default
         if (!note.above) {
-            context.drawImage(Images.BELOW, positionX - half, positionY - NOTE_HEIGHT / 2, size, NOTE_HEIGHT);
+            context.drawImage(Images.BELOW, positionX - half, (positionY * ratio - NOTE_HEIGHT / 2), size, NOTE_HEIGHT);
         }
         // #enddefault
         context.restore()
