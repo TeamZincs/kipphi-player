@@ -813,9 +813,6 @@ export class Player extends EventTarget {
                     }
                     const timeRanges = speedVal !== 0 ? judgeLine.computeTimeRange(beats, timeCalculator, startY / speedVal, endY / speedVal) : [[0, Infinity] as [number, number]];
                     list.timeRanges = timeRanges;
-                    if (timeRanges.length === 0 && judgeLine.id === 5 && beats >= 186) {
-                        debugger;
-                    }
                     
                     // console.timeEnd("computeTimeRange");
                     // console.time("Rendering notes");
@@ -1050,8 +1047,11 @@ export class Player extends EventTarget {
             return;
         }
         const isJudging = TC.toBeats(note.startTime) <= beats
-        if (positionY < 0 && cover && !isJudging) {
+        if (positionY < 0 && (!endpositionY || endpositionY < 0) && cover && !isJudging) {
             return;
+        }
+        if (cover && note.type === NoteType.hold && positionY < 0) {
+            positionY = 0;
         }
         const ratio = this.heightRatio;
         const context = this.context;
