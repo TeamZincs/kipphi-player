@@ -89,7 +89,7 @@ export class Respack {
             const fx = frame % frames[0];
             const fy = Math.floor(frame / frames[0]);
             const height = width * asp;
-            ctx.drawImage(tint ? this.getTintHitEffect(tint) : this.HIT_FX, fx * fw, fy * fh, fw, fh,
+            ctx.drawImage((typeof tint === "number") ? this.getTintHitEffect(tint) : this.HIT_FX, fx * fw, fy * fh, fw, fh,
                 cx - width / 2, cy - height / 2, width, height);
         }
     }
