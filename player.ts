@@ -24,6 +24,7 @@ import { drawNthFrame, Images } from "./image";
 import { type Vector } from "./util";
 import { NOTE_HEIGHT, NOTE_WIDTH } from "./constants";
 import type { Respack } from "./respack";
+import "./polyfill";
 /*
 #node {
 import { Canvas, type CanvasRenderingContext2D, type Image, type ImageData, Path2D } from "skia-canvas";
@@ -78,18 +79,6 @@ type HEX = number;
 // #default
 type ProcessedTexture = OffscreenCanvas | ImageBitmap;
 const __IS_BROWSER = true;
-// @ts-expect-error
-const OffscreenCanvas: typeof window.OffscreenCanvas = window.OffscreenCanvas ?? new Proxy({}, {
-    construct(target, argArray, newTarget) {
-        const canvas = document.createElement("canvas");
-        canvas.width = argArray[0];
-        canvas.height = argArray[1];
-        return canvas;
-    },
-    get(target, prop) {
-        return HTMLCanvasElement[prop];
-    }
-})
 // #enddefault
 /*
 #node {

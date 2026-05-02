@@ -1,3 +1,4 @@
+import "./polyfill";
 export * from "./image";
 export * from "./audio";
 export * from "./matrix";
