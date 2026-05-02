@@ -1,7 +1,7 @@
 {
     "name": "kipphi-player",
     "description": "A Phigros Chart Player, designed with the philosophy of stateless-rendering. Very friendly for editors since it's high-performance.",
-    "version": "2.1.3-beta.2",
+    "version": "2.1.3-beta.3",
     "author": "Team Zincs (https://github.com/TeamZincs)",
     "license": "MIT",
     "repository": {
