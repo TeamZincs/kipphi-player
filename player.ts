@@ -198,6 +198,7 @@ export class Player extends EventTarget {
         this.heightRatio = height === STANDARD_HEIGHT ? 1 : height / STANDARD_HEIGHT;
         const ratio = this.ratio = canvas.width / STANDARD_WIDTH
         this.rootMatrix = this.baseMatrix = identity.scale(ratio, ratio);
+        this.cameraRatio = this._cameraRatio; // 原地磕哒
         this.hitCanvas.height = canvas.height;
         this.hitCanvas.width = canvas.width;
     }
@@ -352,7 +353,7 @@ export class Player extends EventTarget {
         hitContext.setTransform(this.rootMatrix);
         hitContext.clearRect(0, 0, STANDARD_WIDTH, height);
         // 虽然还要加个图片，但是如果不clear，在Node环境下，会泄漏很多内存
-        context.clearRect(STANDARD_WIDTH, -height, STANDARD_WIDTH * 2, height * 2);
+        context.clearRect(-STANDARD_WIDTH, -height, STANDARD_WIDTH * 2, height * 2);
         context.drawImage(this.blurredBackground, -STANDARD_WIDTH / 2, -hh, STANDARD_WIDTH, height);
         // 涂灰色（背景变暗）
         context.fillStyle = "#0008";
