@@ -9,64 +9,145 @@ import { FF_ENCODER_LIBX264, AV_PIX_FMT_RGBA } from "node-av/constants";
 
 import { Player } from "./player";
 import { Images } from "./image"
-import { Chart } from "kipphi";
+import { Chart, type ChartDataRPE } from "kipphi";
 import { AudioProcessor } from "./audioProcessor";
 import { Respack } from "./respack";
 import { readFile } from "fs/promises";
-
+import fs from "fs";
+import fsp from "fs/promises";
+import path from "path";
+import { spawnSync } from "child_process";
+import { ZipReader } from "./unzip";
+import { parseBuffer } from "music-metadata";
 
 
 export function useFont(path: string) {
     FontLibrary.use("phigros", path)
 }
 
-let respack: Respack = null;
+let respackDefault: Respack = null;
 export function useRespack(resp: Respack) {
-    respack = resp;
+    respackDefault = resp;
 }
 
+async function safeDelete(path: string) {
+    const INTERVAL = 1000;
+    if (await fsp.exists(path)) {
+        try {
+            await fsp.unlink(path);
+        } catch (e) {
+            setTimeout(() => safeDelete(path), INTERVAL);
+        }
+    }
+}
+
+interface Resources {
+    chart: Chart;
+    illustration: Blob | Buffer;
+    audio: Buffer;
+    textureFetcher: (name: string) => Promise<Buffer>;
+    respack?: Respack;
+}
+
+interface RenderOptions {
+    /**
+     * 视频高度
+     * @default 900
+     */
+    height?: number;
+    /**
+     * 视频宽度
+     * @default 1600
+     */
+    width?: number;
+    /**
+     * 帧率
+     * @default 60
+     */
+    fps?: number;
+    /**
+     * 音频采样率
+     * @default 44100
+     */
+    sampleRate?: number;
+    /**
+     * 是否使用硬件加速
+     * @default true
+     */
+    useHardwareIfAvailable?: boolean;
+    /**
+     * 时间范围，单位秒
+     */
+    timeRange?: [number, number];
+    /**
+     * 质量参数，越小视频质量越好（本库永远使用浮动码率）
+     */
+    crf?: string;
+    /**
+     * 编码器参数，覆盖默认参数
+     */
+    encoderOptions?: Record<string, string | number | boolean>;
+    /**
+     * 是否启用打击音效
+     */
+    soundEffect?: boolean;
+}
+
+interface MiscOptions {
+    onProgress?: (progress: number, info: { frame: number; fps: number }) => void;
+    /**
+     * 删除临时文件
+     * @default true
+     */
+    deletesTempFileOnFinish?: boolean;
+}
+
+interface RenderResult {
+    video: Buffer;
+    costTime: number;
+    averageFps: number;
+}
 /**
- * 使用 node-av 进行硬件加速视频渲染（纯内存操作）
- * 特点：
+ * 特点（别看了，AI瞎写的）：
  * - 零拷贝：使用 ArrayBuffer.transfer 避免数据复制
  * - 硬件加速：自动检测并使用 NVENC/AMF/VideoToolbox/QSV
  * - 内存池：复用 Buffer 减少 GC 压力
  * - 流水线：并行处理渲染和编码
- * - 纯内存：使用 MPEG-TS 格式，无需临时文件
  * - 音频合并：支持将背景音乐合并到输出视频中
  * - 实时音效消费：在渲染时消费音效条目，减少内存占用
  */
 export async function renderChartFast(
-    chart: Chart,
-    illustrationBlobOrBuffer: Blob | Buffer,
-    textureFetcher: (name: string) => Promise<Buffer>,
-    audioBuffer: Buffer,
-    width = 1600,
-    range?: [number, number]
-): Promise<{
-    out: Buffer;
-    duration: number;
-    fps: number;
-}> {
-    const height = 900;
-    const fps = 60;
-    const left = range && range[0] || 0;
+    resources: Resources,
+    renderOptions?: RenderOptions,
+    miscOptions?: MiscOptions
+): Promise<RenderResult> {
+    const { chart, respack: _respack, illustration: illustrationBlobOrBuffer, audio: audioBuffer, textureFetcher } = resources;
+    const height = renderOptions?.height || 900;
+    const width = renderOptions?.width || 1600;
+    const fps = renderOptions?.fps || 60;
+    const range = renderOptions?.timeRange;
+    const left = range ? range[0] : 0;
     const right = range && range[1] ? Math.min(range[1], chart.duration) : chart.duration;
     const duration = right - left;
     const totalFrames = Math.ceil(duration * fps);
+    const soundEffect = renderOptions?.soundEffect ?? true;
+    const respack = _respack || respackDefault;
 
-    console.log(`🎬 开始快速渲染：${totalFrames} 帧 @ ${fps}fps, 包含音频`);
+    console.log(`🎬 开始快速渲染：${totalFrames} 帧 @ ${fps}fps, ${soundEffect ? "" : "不"}包含音频`);
 
     // 初始化音频处理器
     const audioProcessor = new AudioProcessor();
 
     // 加载音效（tap 和 hold 使用同一音效）
     console.log("🔊 加载音效...");
+    if (!respack.TAP_SE || !respack.DRAG_SE || !respack.FLICK_SE) {
+        throw new Error("需要含有音效的资源包文件");
+    }
     try {
         const loadPromises: Promise<void>[] = [];
-        loadPromises.push(audioProcessor.loadSoundEffect('tap', await readFile('./assets/tap.mp3')));
-        loadPromises.push(audioProcessor.loadSoundEffect('flick', await readFile('./assets/flick.mp3')));
-        loadPromises.push(audioProcessor.loadSoundEffect('drag', await readFile('./assets/drag.mp3')));
+        loadPromises.push(audioProcessor.loadSoundEffect('tap', respack.TAP_SE));
+        loadPromises.push(audioProcessor.loadSoundEffect('flick', respack.FLICK_SE));
+        loadPromises.push(audioProcessor.loadSoundEffect('drag', respack.DRAG_SE));
 
         await Promise.all(loadPromises);
         audioProcessor.init();
@@ -98,21 +179,19 @@ export async function renderChartFast(
         threadCount: 1, // 单线程避免硬件编码器缓冲区问题
         options: {
             r: `${fps}`,            // 帧率
-            crf: '18',
-            qp: '18',
+            crf: renderOptions?.crf || '23',
+            qp: renderOptions?.crf || '23',
             bf: '0',              // 禁用B帧，确保解码顺序=显示顺序，避免画面抖动
             // 输出 Annex B 格式（MPEG-TS 需要的格式）
             h264_profile: 'high',
             h264_level: '41',
+            ...(renderOptions?.encoderOptions || {})
         }
     });
 
     // ========== 临时文件方案 ==========
-    const fs = await import('fs');
-    const path = await import('path');
-    const { execSync } = await import('child_process');
 
-    const outputDir = path.join(process.cwd(), 'test_output');
+    const outputDir = path.join(process.cwd(), 'output' + Math.random().toString(16).slice(0, 4));
     if (!fs.existsSync(outputDir)) {
         fs.mkdirSync(outputDir, { recursive: true });
     }
@@ -166,7 +245,7 @@ export async function renderChartFast(
     const startTime = performance.now();
 
     // 音频配置
-    const targetSampleRate = 44100;
+    const targetSampleRate = renderOptions?.sampleRate || 44100;
     const targetChannels = 2;
     
     // 创建累积音频缓冲区，用于在渲染时混合音效
@@ -352,7 +431,7 @@ export async function renderChartFast(
             
             // 获取并消费该时间段内的音效
             const soundEntries = audioProcessor.getSoundEffects();
-            if (soundEntries.length > 0) {
+            if (soundEffect && soundEntries.length > 0) {
                 //console.log(`[Render] Frame ${videoFrameIndex}: Got ${soundEntries.length} sound entries, time=${currentTime.toFixed(3)}`);
                 
                 // 计算该帧对应的音频采样范围
@@ -594,7 +673,7 @@ export async function renderChartFast(
     // ========== 使用 FFmpeg 处理 faststart ==========
     console.log("🔄 使用 FFmpeg 处理 faststart (移动 moov atom 到开头)...");
     try {
-        execSync(`ffmpeg -y -i "${tempPath}" -c copy -movflags faststart "${finalPath}"`, { stdio: 'inherit' });
+        spawnSync('ffmpeg', ['-y', '-i', tempPath, '-c', 'copy', '-movflags', 'faststart', finalPath], { stdio: 'inherit' });
         console.log(`✅ faststart 处理完成`);
     } catch (err) {
         console.error(`⚠️  FFmpeg faststart 处理失败，使用原始文件:`, err);
@@ -604,17 +683,13 @@ export async function renderChartFast(
         }
     }
 
-    // 清理临时文件
-    if (fs.existsSync(tempPath)) {
-        try {
-            fs.unlinkSync(tempPath);
-        } catch (e) {
-            // 忽略清理错误
-        }
-    }
 
     // 读取最终文件到内存
     const mp4Buffer = fs.readFileSync(finalPath);
+    if (miscOptions?.deletesTempFileOnFinish) {
+        safeDelete(tempPath);
+        safeDelete(finalPath);
+    }
     console.log(`💾 最终输出: ${finalPath} (${(mp4Buffer.byteLength / 1024 / 1024).toFixed(2)} MB)`);
 
     const totalTime = (performance.now() - startTime) / 1000;
@@ -622,10 +697,86 @@ export async function renderChartFast(
 
     // 返回标准 mp4
     return {
-        out: Buffer.from(mp4Buffer),
-        duration: totalTime,
-        fps: totalFrames / totalTime
+        video: Buffer.from(mp4Buffer),
+        costTime: totalTime,
+        averageFps: totalFrames / totalTime
     };
+}
+
+export async function unpackResources(zip: Buffer): Promise<Resources> {
+    
+    const zipReader = new ZipReader(zip);
+    
+    // 提取 info.txt
+    const info = await zipReader.extractFile("info.txt");
+    if (!info) {
+        throw new Error("未找到 info.txt");
+    }
+    
+    const infoText = info.toString();
+    console.log(infoText);
+    const infos = parseInfoTxt(infoText);
+    const songP = infos.Song;
+    const chartP = infos.Chart;
+    const illustrationP = infos.Picture;
+    console.log(infos);
+    
+    // 提取谱面、音乐和背景图
+    const chartF = await zipReader.extractFile(chartP);
+    const songFile = await zipReader.extractFile(songP);
+    const illustrationF = await zipReader.extractFile(illustrationP);
+    
+    if (!chartF) {
+        throw new Error(`未找到 ${chartP}`);
+    }
+    if (!songFile) {
+        throw new Error(`未找到 ${songP}`);
+    }
+    if (!illustrationF) {
+        throw new Error(`未找到 ${illustrationP}`);
+    }
+    
+    // 解析谱面数据
+    const jsonObj = JSON.parse(chartF.toString()) as ChartDataRPE;
+    const duration = await getDuration(songFile);
+    if (!duration) {
+        throw new Error("无法获得音乐时长");
+    }
+    
+    const chart = Chart.fromRPEJSON(jsonObj, duration);
+    return {
+        chart,
+        audio: songFile,
+        illustration: illustrationF,
+        textureFetcher: (name: string) => zipReader.extractFile(name)
+    }
+}
+
+function getDuration(buffer: Buffer) {
+    return parseBuffer(buffer, null, {duration: true}).then(metadata => {
+        return metadata.format.duration
+    }).catch(() => null);
+}
+
+export function parseInfoTxt(infoTxt: string) {
+    const lines = infoTxt.split("\n");
+    const info: Record<string, string>= {};
+    for (const line of lines) {
+        // 第一行是#
+        if (line.startsWith("#")) {
+            continue;
+        }
+        if (line.trim() === "") {
+            continue;
+        }
+        const [key, value] = line.split(":");
+        if (!key || !value) {
+            console.log(`Invalid line: '${line}'d`);
+            continue;
+        }
+        info[key.trim()] = value.trim();
+    }
+    return info;
 }
 
 export async function dryRunRender(
@@ -655,7 +806,7 @@ export async function dryRunRender(
         console.error(`⚠️  音效加载失败:`, err);
     }
     const player = new Player(canvas, audioProcessor, await Respack.loadImage(illustrationBlobOrBuffer as Buffer),
-        respack);
+        respackDefault);
     audioProcessor.linkPlayer(player);
     player.receive(chart, async (str) => await Respack.loadImage(await textureFetcher(str)));
     const fps = 60;

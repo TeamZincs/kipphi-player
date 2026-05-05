@@ -31,9 +31,19 @@ export class Matrix33 {
         const {a, b, c, d, e, f} = this;
         return new Matrix33(a, b, c, d, a * x + c * y + e, b * x + d * y + f);
     }
+    transform(matrix: Matrix33) {
+        const {a, b, c, d, e, f} = this;
+        return new Matrix33(a * matrix.a + c * matrix.b, b * matrix.a + d * matrix.b,
+                          a * matrix.c + c * matrix.d, b * matrix.c + d * matrix.d,
+                          a * matrix.e + c * matrix.f + e, b * matrix.e + d * matrix.f + f);
+    }
     scale(x: number, y: number) {
         const {a, b, c, d, e, f} = this;
-        return new Matrix33(a * x, b * y, c * x, d * y, e, f);
+        // 今天是4月23日，杨哲思在适配SulphrDXD的谱面《琪露诺的算数学院》时怎么改都改不对
+        // 然后发现这里写错了，火冒三丈
+        // 特此留念
+        // 记住，矩阵变换是右乘一个矩阵（列变换），a和b在同一列，乘同一个数
+        return new Matrix33(a * x, b * x, c * y, d * y, e, f);
     }
     invert() {
         const {a, b, c, d, e, f} = this;

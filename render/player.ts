@@ -16,15 +16,18 @@ import {
     TC,
     NNNodeLike
 } from "kipphi";
-import { drawLine, innerProduct, rgba } from "./util";
+import { drawLine, innerProduct, rgb, rgba } from "./util";
 import { Coordinate, identity, Matrix33 } from "./matrix";
 import { drawNthFrame, Images } from "./image";
 import { type Vector } from "./util";
 import { NOTE_HEIGHT, NOTE_WIDTH } from "./constants";
 import type { Respack } from "./respack";
-import { Canvas, type CanvasRenderingContext2D, type Image, type ImageData } from "skia-canvas";
+import "./polyfill";
+import { Canvas, type CanvasRenderingContext2D, type Image, type ImageData, Path2D } from "skia-canvas";
 import { AudioProcessor } from "./audioProcessor";
 
+const HOLD_HE_SPEED = 2;
+const HOLD_HE_INTERVAL = 1 / HOLD_HE_SPEED;
 
 // 扩展JudgeLine，在上面缓存每帧的数据
 declare module "kipphi" {
@@ -43,11 +46,8 @@ declare module "kipphi" {
 const ENABLE_PLAYER = true;
 const DRAWS_NOTES = true;
 
-const DEFAULT_ASPECT_RATIO = 3 / 2
 const LINE_WIDTH = 6.75;
-const LINE_COLOR = "#CCCC77";
 const HIT_EFFECT_SIZE = 200;
-const HALF_HIT = HIT_EFFECT_SIZE / 2
 
 // 以原点为中心，渲染的半径
 const RENDER_SCOPE = 1000;
@@ -55,9 +55,18 @@ const RENDER_SCOPE = 1000;
 const COMBO_TEXT = "KIPPHI";
 
 
+const CURVE_NODE_PATH = new Path2D();
+
+CURVE_NODE_PATH.moveTo(-5, -5);
+CURVE_NODE_PATH.lineTo(-5, 5);
+CURVE_NODE_PATH.lineTo(5, 5);
+CURVE_NODE_PATH.lineTo(5, -5);
+CURVE_NODE_PATH.lineTo(0, -14);
+CURVE_NODE_PATH.closePath();
+
 const STANDARD_WIDTH =  1350;
+const STANDARD_HEIGHT = 900;
 const BASE_LINE_LENGTH = 4050;
-const HIT_FX_SIZE = 1024;
 const getVector = (theta: number): [Vector, Vector] => [[Math.cos(theta), Math.sin(theta)], [-Math.sin(theta), Math.cos(theta)]]
 type HEX = number;
 
@@ -81,9 +90,9 @@ export class Player extends EventTarget {
     playing: boolean;
     background: ImageBitmap;
     blurredBackground: ProcessedTexture;
-    aspect: number;
     noteSize: number;
     noteHeight: number;
+    hitEffectSize: number;
     // soundQueue: SoundEntity[];
     lastBeats: number;
     lastRenderingBeats: number;
@@ -98,6 +107,9 @@ export class Player extends EventTarget {
     showsInfo = true;
     showsLineID = false;
     showsRenderingBaseline = false;
+    showsLineCurve = false;
+    curveFPS = 15;
+    curveMinDuration = 4;
     /** In Seconds */
     baseOffset = -0.017;
     /**
@@ -113,11 +125,18 @@ export class Player extends EventTarget {
      */
     hitEffectNoFollows = !__IS_BROWSER;
 
-    readonly widthRatio: number;
+    heightRatio: number;
 
     
     textureMapping: Map<string, ImageBitmap> = new Map();
+
+    rootMatrix: Matrix33;
+    baseMatrix: Matrix33;
+    ratio: number;
     
+
+    public height: number;
+
     constructor(
         canvas: HTMLCanvasElement,
         audioProcessor: AudioProcessor,
@@ -134,13 +153,21 @@ export class Player extends EventTarget {
 
         this.blurringRadius = 50;
 
+        this.useNewAspect();
 
         this.playing = false;
-        this.aspect = DEFAULT_ASPECT_RATIO;
         this.noteSize = NOTE_WIDTH;
         this.noteHeight = NOTE_HEIGHT;
-        this.widthRatio = canvas.width === STANDARD_WIDTH ? 1 : canvas.width / STANDARD_WIDTH;
-        this.initCoordinate();
+        this.hitEffectSize = this.noteSize * 1.3;
+    }
+    useNewAspect() {
+        const canvas = this.canvas;
+        const height = this.height = canvas.height / canvas.width * STANDARD_WIDTH;
+        this.heightRatio = height === STANDARD_HEIGHT ? 1 : height / STANDARD_HEIGHT;
+        const ratio = this.ratio = canvas.width / STANDARD_WIDTH
+        this.rootMatrix = this.baseMatrix = identity.scale(ratio, ratio);
+        this.hitCanvas.height = canvas.height;
+        this.hitCanvas.width = canvas.width;
     }
     override addEventListener(type: "drawn" | "play" | "pause", listener: (e: Event) => void, options?: EventListenerOptions): void {
         super.addEventListener(type, listener, options);
@@ -158,29 +185,6 @@ audioCurrentTime: number = 0;
     }
     get renderingTime(): number {
         return this.time + this.renderingOffset * this.playbackRate;
-    }
-    initCoordinate() {
-        let {canvas, context, hitCanvas, hitContext} = this;
-        
-        // console.log(context.getTransform())
-        const height = 900;
-        const width = this.canvas.width;
-        canvas.height = height;
-        canvas.width = width;
-        hitCanvas.height = height;
-        hitCanvas.width = width
-        
-        const RATIO = 1.0
-        // 计算最终的变换矩阵
-        const tx = width / 2;
-        const ty = height / 2;
-
-        // 设置变换矩阵
-        context.setTransform(RATIO, 0, 0, RATIO, tx, ty);
-        //hitContext.scale(0.5, 0.5)
-        context.save()
-        hitContext.save()
-        // console.log(context.getTransform())
     }
     _blurringRadius: number = 50;
 
@@ -200,6 +204,16 @@ audioCurrentTime: number = 0;
             this.blurredBackground = img;
         })
     }
+    _cameraRatio = 1;
+    set cameraRatio(ratio: number) { 
+        this._cameraRatio = ratio;
+        const hw = STANDARD_WIDTH / 2;
+        const hh = this.height / 2;
+        this.baseMatrix = identity.scale(this.ratio, this.ratio)
+            .translate(hw * (1 - ratio), hh * (1 - ratio))
+            .scale(ratio, ratio)
+    }
+    get cameraRatio() { return this._cameraRatio; }
 
     /**
      * 计算当前combo。
@@ -210,7 +224,6 @@ audioCurrentTime: number = 0;
     computeCombo(renderingBeats: number) {
         const {chart} = this;
         const beats = renderingBeats;
-        const timeCalculator = chart.timeCalculator;
         let lastUncountedNNN = this.lastUncountedNNN || chart.nnnList.head.next;
         let lastUncountedTailNNN = this.lastUncountedTailNNN || chart.nnnList.head.next
         let lastCountedBeats = this.lastCountedBeats || 0;
@@ -268,6 +281,7 @@ audioCurrentTime: number = 0;
         }
         this.currentCombo = combo;
     }
+    private map: Map<string, JudgeLine[]>; 
     render() {
         if (!ENABLE_PLAYER) {
             return;
@@ -275,15 +289,17 @@ audioCurrentTime: number = 0;
         // console.time("render")
         const context = this.context;
 
-        const width = this.canvas.width;
-        const hw = width / 2
-        context.setTransform(1, 0, 0, 1, hw, 450);
+        const height = this.height;
+        const hh = height / 2;
+        context.setTransform(this.baseMatrix)
+        context.transform(1, 0, 0, 1, STANDARD_WIDTH / 2, hh);
         context.save();
         const hitContext = this.hitContext;
-        hitContext.clearRect(0, 0, width, 900);
+        hitContext.setTransform(this.rootMatrix);
+        hitContext.clearRect(0, 0, STANDARD_WIDTH, height);
         // 虽然还要加个图片，但是如果不clear，在Node环境下，会泄漏很多内存
-        context.clearRect(-width, -900, width * 2, 1800);
-        context.drawImage(this.blurredBackground, -hw, -450, width, 900);
+        context.clearRect(STANDARD_WIDTH, -height, STANDARD_WIDTH * 2, height * 2);
+        context.drawImage(this.blurredBackground, -STANDARD_WIDTH / 2, -hh, STANDARD_WIDTH, height);
         // 涂灰色（背景变暗）
         context.fillStyle = "#0008";
         context.fillRect(-27000, -18000, 54000, 36000)
@@ -302,18 +318,21 @@ audioCurrentTime: number = 0;
         // drawLine(context, 0, 900, 0, -900);
         context.restore();
         const renderingBeats = this.renderingBeats;
+        const renderingTime = this.renderingTime;
+
         
         // console.log("rendering")
-        const lineQueue = [...this.chart.judgeLines].sort((a, b) => (a.zOrder ?? 0) - (b.zOrder ?? 0));
+        const chart = this.chart;
+        const lineQueue = [...chart.judgeLines].sort((a, b) => (a.zOrder ?? 0) - (b.zOrder ?? 0));
         for (let line of this.chart.orphanLines) {
-            this.precalculate(identity.translate(hw, 450).scale(this.widthRatio, -1), line, renderingBeats);
+            this.precalculate(identity.translate(STANDARD_WIDTH / 2, hh).scale(1, -this.heightRatio), line, renderingBeats, renderingTime);
         }
         for (let line of lineQueue) {
             if (line.optimized) {
                 continue;
             }
             context.save();
-            this.renderLine(line, renderingBeats);
+            this.renderLine(line, renderingBeats, renderingTime);
             context.restore();
         }
         context.save()
@@ -321,20 +340,25 @@ audioCurrentTime: number = 0;
         hitContext.lineWidth = 5;
         // drawLine(hitContext, 0, 900, 1350, 0);
         
-        context.setTransform(1, 0, 0, 1, 0, 0);
-        context.drawImage(this.hitCanvas, 0, 0, width, 900)
+        context.setTransform(this.baseMatrix);
+        context.drawImage(this.hitCanvas, 0, 0, STANDARD_WIDTH, height);
         context.restore()
 
-
-
+        if (this.showsLineCurve) {
+            this.renderLineCurve(renderingBeats);
+        }
+        if (this.showsLineID) {
+            this.renderLineIDs();
+        }
         if (this.showsInfo) {
             context.save()
-            const setTransform = (lineOrNull: JudgeLine | null) => {
+            const setTransformAndAlpha = (lineOrNull: JudgeLine | null, transform: Matrix33 = identity) => {
                 if (!lineOrNull) {
-                    context.setTransform(identity.translate(hw, 450));
+                    context.setTransform(this.baseMatrix.transform(transform).translate(STANDARD_WIDTH / 2, hh));
                 } else {
-                    context.setTransform(lineOrNull.renderMatrix);
-                    context.scale(1, -1)
+                    context.setTransform(this.baseMatrix.transform(transform).transform(lineOrNull.renderMatrix));
+                    context.scale(1, -1);
+                    context.globalAlpha = lineOrNull.alpha;
                 }
             }
             this.computeCombo(renderingBeats);
@@ -342,45 +366,60 @@ audioCurrentTime: number = 0;
             context.font = "32px phigros"
             context.textAlign = "left";
 
-
-            const chart = this.chart;
             const title = chart.name;
             const level = chart.level;
             const combo = this.currentCombo;
-            setTransform(chart.nameAttach)
-            context.fillText(title, -hw + 35, 420);
+            const hw = STANDARD_WIDTH / 2;
 
+            // name
+            setTransformAndAlpha(chart.nameAttach, identity.translate(-hw + 43, hh - 34))
+            context.fillText(title, 0, 0);
 
+            // level
             context.textAlign = "right";
-            setTransform(chart.levelAttach)
-            context.fillText(level, hw - 35, 420);
+            setTransformAndAlpha(chart.levelAttach, identity.translate(hw - 43, hh - 34))
+            context.fillText(level, 0, 0);
 
             context.font = "40px phigros";
-
+            // score
             const score = combo / chart.maxCombo * 100_0000;
             const text = score.toFixed(0).padStart(7, "0")
-            setTransform(chart.scoreAttach)
-            context.fillText(text, hw - 35, -390);
+            context.textBaseline = "top";
+            setTransformAndAlpha(chart.scoreAttach, identity.translate(hw - 39, -hh + 30))
+            context.fillText(text, 0, 0);
 
-            if (combo >= 3) {
+            // pause
+            setTransformAndAlpha(chart.pauseAttach, identity.translate(-hw + 39, -hh + 30))
+            context.fillRect(0, 2, 8, 30)
+            context.fillRect(16, 2, 8, 30)
+
+            // bar
+            const progress = this.time / chart.duration;
+            const barWidth = progress * STANDARD_WIDTH;
+            setTransformAndAlpha(chart.barAttach, identity.translate(-hw, -hh));
+            context.fillStyle = "#aaa"
+            context.fillRect(0, 0, barWidth, 8)
+            context.fillStyle = "#fff"
+
+            context.fillRect(barWidth, 0, 2, 8)
+
+            if (combo >= 3) { // combo(number)
                 context.textAlign = "center";
+                context.textBaseline = "alphabetic";
                 
                 context.font = "64px phigros"
-                setTransform(chart.combonumberAttach)
-                context.fillText(combo.toString(), 0, -384);
+                setTransformAndAlpha(chart.combonumberAttach, identity.translate(0, -hh + 50))
+                context.fillText(combo.toString(), 0, 20);
 
                 context.font = "24px phigros";
-                setTransform(chart.comboAttach)
-                context.fillText(COMBO_TEXT, 0, -356);
+                setTransformAndAlpha(chart.comboAttach, identity.translate(0, -hh + 95))
+                context.fillText(COMBO_TEXT, 0, 0);
 
 
             }
             context.restore();
         }
-        context.resetTransform();
-        context.textAlign = "center";
-        context.font = "20px phigros";
-        context.fillStyle = "#ddd";
+        context.setTransform(this.baseMatrix);
 
         this.dispatchEvent(new Event("drawn"));
 
@@ -388,35 +427,45 @@ audioCurrentTime: number = 0;
         
         // console.timeEnd("render")
     }
-    precalculate(matrix: Matrix33, judgeLine: JudgeLine, beats: number) {
+    precalculate(matrix: Matrix33, judgeLine: JudgeLine, beats: number, seconds: number) {
         
-        // const timeCalculator = this.chart.timeCalculator
-        const alpha = judgeLine.getStackedValue("alpha", beats);
+        const timeCalculator = this.chart.timeCalculator
+        const alpha = judgeLine.getStackedValueBySeconds("alpha", beats, seconds, timeCalculator);
         if (judgeLine.nnLists.size === 0 && judgeLine.hnLists.size === 0 && alpha <= 0 && judgeLine.children.size === 0 && !judgeLine.hasAttachUI) {
             judgeLine.optimized = true;
             return;
         } else {
             judgeLine.optimized = false;
         }
-        const x = judgeLine.getStackedValue("moveX", beats);
-        const y = judgeLine.getStackedValue("moveY", beats);
-        const theta = judgeLine.getStackedValue("rotate", beats) * Math.PI / 180;
+        const x = judgeLine.getStackedValueBySeconds("moveX", beats, seconds, timeCalculator);
+        const y = judgeLine.getStackedValueBySeconds("moveY", beats, seconds, timeCalculator);
+        const theta = judgeLine.getStackedValueBySeconds("rotate", beats, seconds, timeCalculator) * Math.PI / 180;
         judgeLine.moveX = x;
         judgeLine.moveY = y;
         judgeLine.rotate = theta;
         judgeLine.alpha = alpha;
         const {x: transformedX, y: transformedY} = new Coordinate(x, y).mul(matrix);
+
         
-        const ratio = this.widthRatio;
-        judgeLine.transformedX = transformedX * ratio;
+        const ratio = this.heightRatio;
+        judgeLine.transformedX = transformedX;
         judgeLine.transformedY = transformedY;
-        const myMatrix = judgeLine.rotatesWithFather ? matrix.translate(x, y).rotate(-theta) : identity.translate(transformedX, transformedY).rotate(-theta).scale(1, -1);
-        
+        if (this.showsLineID) {
+            const map = this.map;
+            const k = Math.round(transformedX) + "," + Math.round(transformedY);
+            if (map.has(k)) {
+                map.get(k)!.push(judgeLine);
+            } else {
+                map.set(k, [judgeLine]);
+            }
+        }
+        const myMatrix = judgeLine.rotatesWithFather ? matrix.translate(x, y).rotate(-theta).scale(1, ratio) : identity.translate(transformedX, transformedY).scale(1, -1).rotate(-theta).scale(1, ratio);
+        //console.log( judgeLine.id, transformedX, transformedY, matrix)
         // Cache a matrix
-        judgeLine.renderMatrix = myMatrix;
+        judgeLine.renderMatrix = myMatrix.scale(1, 1 / ratio);
         if (judgeLine.children.size !== 0) {
             for (let line of judgeLine.children) {
-                this.precalculate(myMatrix, line, beats);
+                this.precalculate(myMatrix, line, beats, seconds);
             }
         }
     }
@@ -429,24 +478,103 @@ audioCurrentTime: number = 0;
      * @param judgeLine 
      * @param beats 
      */
-    calculateLineMatrix(judgeLine: JudgeLine, beats: number) {
-        const hw = this.canvas.width / 2;
+    calculateLineMatrix(judgeLine: JudgeLine, beatsOrSeconds: number, useSeconds: boolean = false) {
+        const seconds = useSeconds ? beatsOrSeconds : this.chart.timeCalculator.toSeconds(beatsOrSeconds);
+        const beats = useSeconds ? this.chart.timeCalculator.secondsToBeats(seconds) : beatsOrSeconds;
+        return this._calculateLineMatrix(judgeLine, beats, seconds).scale(1, 1 / this.heightRatio);
+    }
+    _calculateLineMatrix(judgeLine: JudgeLine, beats: number, seconds: number) {
+        const hw = STANDARD_WIDTH / 2;
+        const hh = this.height / 2;
+        const ratio = this.heightRatio;
         const x = judgeLine.getStackedValue("moveX", beats);
         const y = judgeLine.getStackedValue("moveY", beats);
         const theta = judgeLine.getStackedValue("rotate", beats) * Math.PI / 180;
         const father = judgeLine.father;
-        if (!father) {
-            return identity.translate(x + hw, -y + 450).rotate(-theta).scale(1, -1);
-        } else if (judgeLine.rotatesWithFather) {
-            const parentMatrix = this.calculateLineMatrix(father, beats);
-            return parentMatrix.translate(x, y).rotate(-theta);
+        const parentMatrix = father ? this._calculateLineMatrix(father, beats, seconds) : identity.translate(hw, hh).scale(1, -ratio);
+        if (judgeLine.rotatesWithFather) {
+            return parentMatrix.translate(x, y).rotate(-theta).scale(1, ratio);
         } else {
-            const parentMatrix = this.calculateLineMatrix(father, beats);
             const {x: tx, y: ty} = new Coordinate(x, y).mul(parentMatrix);
-            return identity.translate(tx, ty).rotate(-theta).scale(1, -1);
+            return identity.translate(tx, ty).scale(1, -1).rotate(-theta).scale(1, ratio);
         }
     }
-    renderLine(judgeLine: JudgeLine, beats: number) {
+    renderLineCurve(beats: number) {
+        const context = this.context;
+        const timeCalculator = this.chart.timeCalculator;
+        const curveFPS = this.curveFPS;
+        const line = this.chart.judgeLines[this.greenLine];
+        const curveMinDuration = this.curveMinDuration;
+        // const beatss: number[] = [];
+        // const beatss2: number[] = [];
+        // const layers = line.eventLayers;
+        // const len = layers.length;
+        // for (const type of ["moveX", "moveY"] as const) {
+        //     for (let i = 0; i < len; i++) {
+        //         const layer = layers[i];
+        //         if (!layer) {
+        //             continue;
+        //         }
+        //         const seq = layer[type];
+        //         if (!seq) {
+        //             continue;
+        //         }
+        //         const node = seq.getNodeAt(beats);
+        //         if (node) {
+        //             beatss.push(TC.toBeats(node.time));
+        //             const endNode = node.next;
+        //             if (endNode.type !== NodeType.TAIL) {
+        //                 beatss2.push(TC.toBeats(endNode.time));
+        //             }
+        //         }
+        //     }
+        // }
+        // const toStartAt = Math.min(Math.max(...beatss), Math.floor(beats) - curveMinDuration / 2);
+        // const toEndAt =  Math.max(Math.min(...beatss2), Math.floor(beats) + curveMinDuration / 2);
+        const toStartAt = Math.max(Math.floor(beats) - curveMinDuration / 2, 0);
+        const toEndAt = Math.min(Math.ceil(beats) + curveMinDuration / 2, this.chart.effectiveBeats);
+        const startSecs = Math.round(timeCalculator.toSeconds(toStartAt) * curveFPS) / curveFPS;
+        const endSecs = timeCalculator.toSeconds(toEndAt);
+        const duration = endSecs - startSecs;
+        const frames = Math.round(duration * curveFPS);
+        context.save();
+        for (let i = 0; i < frames; i++) {
+            const secs = startSecs + i / curveFPS;
+            const matrix = this.calculateLineMatrix(line, secs, true);
+            context.setTransform(this.baseMatrix.transform(matrix));
+            context.fillStyle = `hsl(${i / frames * 360}, 100%, 50%)`;
+            context.fill(CURVE_NODE_PATH);
+        }
+        context.restore();
+    }
+    renderLineIDs() {
+        const context = this.context;
+        const map = this.map;
+        context.save();
+        context.setTransform(this.baseMatrix);
+        context.font = "30px phigros"
+        for (const [_, lines] of map) {
+            const x = lines[0].transformedX;
+            const y = lines[0].transformedY;
+            const ids = lines.map(line => line.id);
+            ids.sort((a, b) => a - b);
+            const len = ids.length;
+            const segs: string[] = [];
+            let prev = ids[0];
+            let starting = prev;
+            for (let i = 1; i < len; i++) {
+                const cur = ids[i];
+                if (cur !== prev + 1) {
+                    segs.push(prev === starting ? starting.toString() : `${starting}~${prev}`);
+                    starting = cur;
+                }
+                prev = cur;
+            }
+            segs.push(prev === starting ? prev.toString() : `${starting}~${prev}`);
+            context.fillText(segs.join(", "), x, y + 40);
+        }
+    }
+    renderLine(judgeLine: JudgeLine, beats: number, seconds: number) {
         const context = this.context;
         const respack = this.respack;
         const timeCalculator = this.chart.timeCalculator;
@@ -455,13 +583,13 @@ audioCurrentTime: number = 0;
         const myMatrix = judgeLine.renderMatrix;
         const transformedX = judgeLine.transformedX;
         const transformedY = judgeLine.transformedY;
-        context.setTransform(myMatrix);
+        context.setTransform(this.baseMatrix.transform(myMatrix)/*.scale(1 / this.widthRatio, 1)*/);
 
 
 
         // Draw Line
-        const scaleX = judgeLine.extendedLayer.scaleX.getValueAt(beats);
-        const scaleY = judgeLine.extendedLayer.scaleY.getValueAt(beats);
+        const scaleX = judgeLine.extendedLayer.scaleX.getValueAtBySecs(beats, seconds, timeCalculator);
+        const scaleY = judgeLine.extendedLayer.scaleY.getValueAtBySecs(beats, seconds, timeCalculator);
         const anchor = judgeLine.anchor;
         // console.log(scaleX, scaleY, anchor)
 
@@ -472,11 +600,12 @@ audioCurrentTime: number = 0;
         context.scale(1, -1);
 
         const hasText = !!judgeLine.extendedLayer.text;
+        const hasUIAttached = judgeLine.hasAttachUI;
 
         if (hasText) {
-            const textContent = judgeLine.extendedLayer.text.getValueAt(beats) as string;
+            const textContent = judgeLine.extendedLayer.text.getValueAtBySecs(beats, seconds, timeCalculator) as string;
             context.save();
-            context.fillStyle = rgba(...judgeLine.extendedLayer.color?.getValueAt(beats) ?? [255, 255, 255], alpha);
+            context.fillStyle = rgba(...judgeLine.extendedLayer.color?.getValueAtBySecs(beats, seconds, timeCalculator) ?? [255, 255, 255], alpha);
             context.font = "54px phigros";
             context.scale(scaleX, scaleY);
             context.textAlign = "center";
@@ -486,35 +615,43 @@ audioCurrentTime: number = 0;
             const width = metrics.width;
             context.fillText(textContent, width * (anchor[0] - 0.5), height * (anchor[1] - 0.5));
             context.restore();
-        } else if (textureName === "line.png") {
-            const lineColor: RGB = judgeLine.extendedLayer.color?.getValueAt(beats) ?? [200, 200, 120];
-            context.fillStyle = rgba(...(this.greenLine === judgeLine.id ? ([100, 255, 100] as RGB) : lineColor), alpha / 255)
-            const scaledWidth = BASE_LINE_LENGTH * scaleX;
-            const scaledHeight = LINE_WIDTH * scaleY;
-            context.fillRect(-scaledWidth * anchor[0], -scaledHeight * anchor[1], scaledWidth, scaledHeight)
-            // Fixes #1 on "kipphiApparatusLegacy"
-        } else {
-            context.globalAlpha = alpha / 255;
-            const bitmap = this.textureMapping.get(textureName);
-            const width = bitmap.width;
-            const height = bitmap.height;
-            const scaledWidth = width * scaleX;
-            const scaledHeight = height * scaleY;
-            context.drawImage(this.textureMapping.get(textureName),
-                -scaledWidth * anchor[0], -scaledHeight * anchor[1], scaledWidth, scaledHeight)
-            context.globalAlpha = 1;
+        }
+        if (!hasText && !hasUIAttached) {
+            if (textureName === "line.png") {
+                const lineColor: RGB = judgeLine.extendedLayer.color?.getValueAtBySecs(beats, seconds, timeCalculator) ?? [200, 200, 120];
+                context.fillStyle = rgba(...(this.greenLine === judgeLine.id ? ([100, 255, 100] as RGB) : lineColor), alpha / 255)
+                const scaledWidth = BASE_LINE_LENGTH * scaleX;
+                const scaledHeight = LINE_WIDTH * scaleY;
+                context.fillRect(-scaledWidth * anchor[0], -scaledHeight * anchor[1], scaledWidth, scaledHeight)
+                // Fixes #1 on "kipphiApparatusLegacy"
+            } else {
+                const lineColor: RGB = judgeLine.extendedLayer.color?.getValueAtBySecs(beats, seconds, timeCalculator) ?? [255, 255, 255];
+                context.globalAlpha = alpha / 255;
+                const bitmap = this.textureMapping.get(textureName);
+                let texture: ImageBitmap | OffscreenCanvas = bitmap;
+                if (lineColor.some(x => x !== 255)) {
+                    texture = this.tintLineTexture(bitmap, lineColor);
+                }
+                const width = bitmap.width;
+                const height = bitmap.height;
+                const scaledWidth = width * scaleX;
+                const scaledHeight = height * scaleY;
+                context.drawImage(texture,
+                    -scaledWidth * anchor[0], -scaledHeight * anchor[1], scaledWidth, scaledHeight)
+                context.globalAlpha = 1;
+            }
         }
 
         // Draw Anchor
 
-        if (this.showsLineID) {
-            context.save();
-            context.fillStyle = "white";
-            context.font = "40px phigros";
+        // if (this.showsLineID) {
+        //     context.save();
+        //     context.fillStyle = "white";
+        //     context.font = "40px phigros";
                 
-            context.fillText(`#${judgeLine.id} ${judgeLine.name.toLowerCase() === "untitled" ? "" : judgeLine.name}`, 10, 50);
-            context.restore();
-        }
+        //     context.fillText(`#${judgeLine.id} ${judgeLine.name.toLowerCase() === "untitled" ? "" : judgeLine.name}`, 10, 50);
+        //     context.restore();
+        // }
 
         judgeLine.computeCurrentFloorPosition(beats, timeCalculator);
 
@@ -589,7 +726,7 @@ audioCurrentTime: number = 0;
                         drawScope(endY, startY);
                     }
                     const timeRanges = speedVal !== 0 ? judgeLine.computeTimeRange(beats, timeCalculator, startY / speedVal, endY / speedVal) : [[0, Infinity] as [number, number]];
-                    list.timeRanges = timeRanges
+                    list.timeRanges = timeRanges;
                     
                     // console.timeEnd("computeTimeRange");
                     // console.time("Rendering notes");
@@ -693,7 +830,7 @@ audioCurrentTime: number = 0;
         const line = tree.parentLine
         // console.log(hitContext.getTransform())
         const end = tree.getNodeAt(endBeats);
-        const ratio = this.widthRatio;
+        const heSize = this.hitEffectSize;
         if (noteNode.type === NodeType.TAIL) {
             return;
         }
@@ -706,12 +843,12 @@ audioCurrentTime: number = 0;
                 if (note.isFake) {
                     continue;
                 }
-                const posX = note.positionX * ratio;
+                const posX = note.positionX;
                 const yo = note.yOffset * (note.above ? 1 : -1);
                 const {x, y} = new Coordinate(posX, yo).mul(hitEffectNoFollows ? this.calculateLineMatrix(line, beats) : matrix);
                 // console.log("he", x, y);
                 const he = note.tintHitEffects;
-                respack.hitDrawer(hitContext, x, y, HIT_EFFECT_SIZE, renderingTime - timeCalculator.toSeconds(beats), he)
+                respack.hitDrawer(hitContext, x, y, heSize, renderingTime - timeCalculator.toSeconds(beats), he)
             }
 
             noteNode = <NoteNode>noteNode.next
@@ -734,7 +871,7 @@ audioCurrentTime: number = 0;
         let noteNode = start;
         const end = tree.getNodeAt(endBeats);
         const hitEffectDuration = respack.hitFxDuration;
-        const ratio = this.widthRatio;
+        const heSize = this.hitEffectSize;
         if (noteNode.type === NodeType.TAIL) {
             return;
         }
@@ -749,21 +886,22 @@ audioCurrentTime: number = 0;
                     continue;
                 }
                 if (hitEffectNoFollows) {
-                    const endTimeSecs = timeCalculator.toSeconds(Math.floor(TC.toBeats(note.endTime)));
+                    const endTimeSecs = timeCalculator.toSeconds(Math.floor(TC.toBeats(note.endTime) * 2) / 2);
                     if (renderingTime > endTimeSecs + hitEffectDuration) {
                         continue;
                     }
                 } else if (startBeats > TC.toBeats(note.endTime)) {
                     continue;
                 }
-                const posX = note.positionX * ratio;
+                const posX = note.positionX;
                 const yo = note.yOffset * (note.above ? 1 : -1);
-                let intBeats = Math.floor(Math.min(beats, TC.toBeats(note.endTime)));
-                while (intBeats > startBeats) {
-                    const {x, y} = new Coordinate(posX, yo).mul(hitEffectNoFollows ? this.calculateLineMatrix(line, intBeats) : matrix);
+                const noteStartBeats = TC.toBeats(note.startTime);
+                let beatsToRender = Math.floor((Math.min(beats, TC.toBeats(note.endTime)) - noteStartBeats - 0.01) * HOLD_HE_SPEED) / HOLD_HE_SPEED + noteStartBeats;
+                while (beatsToRender >= Math.max(startBeats, TC.toBeats(note.startTime))) {
+                    const {x, y} = new Coordinate(posX, yo).mul(hitEffectNoFollows ? this.calculateLineMatrix(line, beatsToRender) : matrix);
                     const tintHE = note.tintHitEffects;
-                    respack.hitDrawer(hitContext, x, y, HIT_EFFECT_SIZE, renderingTime - timeCalculator.toSeconds(intBeats), tintHE);
-                    intBeats--;
+                    respack.hitDrawer(hitContext, x, y, heSize, renderingTime - timeCalculator.toSeconds(beatsToRender), tintHE);
+                    beatsToRender -= HOLD_HE_INTERVAL;
                 }
             }
             noteNode = <NoteNode>noteNode.next
@@ -784,7 +922,7 @@ audioCurrentTime: number = 0;
                 this.renderNote(
                     note,
                     chord,
-                    startY < 0 ? 0 : startY,
+                    startY,
                     beats,
                     cover,
                     judgeLine.getRelativeFloorPositionAt(TC.toBeats(note.endTime), timeCalculator) * note.speed
@@ -817,14 +955,18 @@ audioCurrentTime: number = 0;
         if (TC.toBeats(note.startTime) - note.visibleBeats > beats) {
             return;
         }
-        if (positionY < 0 && cover) {
+        const isJudging = TC.toBeats(note.startTime) <= beats
+        if (positionY < 0 && (!endpositionY || endpositionY < 0) && cover && !isJudging) {
             return;
         }
+        if (cover && note.type === NoteType.hold && positionY < 0) {
+            positionY = 0;
+        }
+        const ratio = this.heightRatio;
         const context = this.context;
         const respack = this.respack;
         let zero = 0;
-        const ratio = this.widthRatio;
-        const positionX = note.positionX * ratio;
+        const positionX = note.positionX;
         
         if (note.yOffset) {
             positionY += note.yOffset;
@@ -849,29 +991,39 @@ audioCurrentTime: number = 0;
             context.globalAlpha = note.alpha / 255;
         }
         if (note.type === NoteType.hold) {
-            const isJudging = TC.toBeats(note.startTime) <= beats
             positionY = isJudging ? zero : positionY;
             length = isJudging ? (endpositionY - zero) : length;
             length = -length
             const HOLD_BODY = chord ? respack.HOLD_BODY_HL : respack.HOLD_BODY;
             const HOLD_HEAD = chord ? respack.HOLD_HEAD_HL : respack.HOLD_HEAD;
             const HOLD_TAIL = chord ? respack.HOLD_TAIL_HL : respack.HOLD_TAIL;
-            context.drawImage(HOLD_BODY, positionX - half, positionY - length, size, length);
+            context.drawImage(HOLD_BODY, positionX - half, (positionY - length) * ratio, size, length * ratio);
             if (!isJudging || respack.holdKeepHead) {
                 const h = size * (HOLD_HEAD.height / HOLD_HEAD.width)
-                context.drawImage(HOLD_HEAD, positionX - half, positionY - (respack.holdCompact ? h / 2 : 0),
+                context.drawImage(HOLD_HEAD, positionX - half, (positionY * ratio - (respack.holdCompact ? h / 2 : 0)) ,
                     size, h);
             }
             const tailHeight = size * (HOLD_TAIL.height / HOLD_TAIL.width)
-            context.drawImage(HOLD_TAIL, positionX - half, positionY - length - (respack.holdCompact ? tailHeight / 2 : tailHeight),
+            context.drawImage(HOLD_TAIL, positionX - half, (positionY - length) * ratio - (respack.holdCompact ? tailHeight / 2 : tailHeight),
                 size, tailHeight);
         } else {
-            respack.noteDrawer(context, positionX, positionY, size, this.noteSize, note.type, chord, note.tint);
+            respack.noteDrawer(context, positionX, positionY * ratio, size, this.noteSize, note.type, chord, note.tint);
         }
         
         // 不再使用叠加的方法
         context.restore()
         
+    }
+    tintLineTexture(bitmap: ImageBitmap, color: RGB): OffscreenCanvas {
+        const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+        const context = canvas.getContext('2d');
+        context.drawImage(bitmap, 0, 0);
+        context.globalCompositeOperation = "source-in";
+        context.fillStyle = rgb(...color);
+        context.fillRect(0, 0, bitmap.width, bitmap.height);
+        context.globalCompositeOperation = "multiply";
+        context.drawImage(bitmap, 0, 0);
+        return canvas;
     }
 
     receive(chart: Chart, textureFetcher: (name: string) => Promise<ImageBitmap>) {

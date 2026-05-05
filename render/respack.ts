@@ -78,7 +78,7 @@ export class Respack {
             const fx = frame % frames[0];
             const fy = Math.floor(frame / frames[0]);
             const height = width * asp;
-            ctx.drawImage(tint ? this.getTintHitEffect(tint) : this.HIT_FX, fx * fw, fy * fh, fw, fh,
+            ctx.drawImage((typeof tint === "number") ? this.getTintHitEffect(tint) : this.HIT_FX, fx * fw, fy * fh, fw, fh,
                 cx - width / 2, cy - height / 2, width, height);
         }
     }
@@ -146,6 +146,7 @@ export class Respack {
         pack.holdCompact = meta.holdCompact;
         pack.hitFxFrames = meta.hitFx;
         pack.colorPerfect = meta.colorPerfect ?? 0xe1ffec9f;
+        pack.hitFxDuration = meta.hitFxDuration ?? 0.5;
 
         pack.HIT_FX = await Respack.loadImage(await readFile(`hit_fx.png`));
         pack.HIT_FX = await Respack.tintImage(pack.HIT_FX, pack.colorPerfect);

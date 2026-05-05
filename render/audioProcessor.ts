@@ -183,6 +183,10 @@ export class AudioProcessor {
             if (!entry || entry.time < expiry) {
                 break;
             }
+            if (index === this.soundQueueIndex) {
+                // 防止无限遍历环形数组
+                break;
+            }
             entries.push(entry);
         }
         return entries;
