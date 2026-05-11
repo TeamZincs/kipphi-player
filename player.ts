@@ -124,8 +124,9 @@ export class Player extends EventTarget {
     // #default
     lastRenderingRealTime: number = 0;
     renderedFrames: number = 0;
-    lastMeasuredFPSStr: string = "N/A (N/A)";
+    lastMeasuredFPSStr: string = "N/A (N/A, longest N/A)";
     collectedFrameTime: number = 0;
+    longestFrameTime: number = 0;
     // #enddefault
     showsInfo = true;
     showsLineID = false;
@@ -413,7 +414,7 @@ export class Player extends EventTarget {
                 } else {
                     context.setTransform(this.baseMatrix.transform(transform).transform(lineOrNull.renderMatrix));
                     context.scale(1, -1);
-                    context.globalAlpha = lineOrNull.alpha;
+                    context.globalAlpha = lineOrNull.alpha / 255;
                 }
             }
             this.computeCombo(renderingBeats);
@@ -481,17 +482,19 @@ export class Player extends EventTarget {
         const now = performance.now();
         this.renderedFrames++;
         this.collectedFrameTime += now - start;
+        this.longestFrameTime = Math.max(this.longestFrameTime, now - start);
         if (now - this.lastRenderingRealTime >= 1000) {
             const averageFrameTime = this.collectedFrameTime / this.renderedFrames;
-            this.lastMeasuredFPSStr = (this.renderedFrames * 1000 / (now - this.lastRenderingRealTime)).toFixed(1) + ` (${averageFrameTime.toFixed(1)}ms)`;
+            this.lastMeasuredFPSStr = (this.renderedFrames * 1000 / (now - this.lastRenderingRealTime)).toFixed(1) + ` (avg ${averageFrameTime.toFixed(2)}ms, max ${this.longestFrameTime.toFixed(2)}ms)`;
             this.lastRenderingRealTime = now;
             this.renderedFrames = 0;
             this.collectedFrameTime = 0;
+            this.longestFrameTime = 0;
         }
         context.textAlign = "left";
         context.fillText(this.lastMeasuredFPSStr, 30, 25);
         context.textAlign = "center";
-        context.fillText(this.time.toFixed(2) + " " + renderingBeats.toFixed(2), STANDARD_WIDTH / 2, height)
+        context.fillText(this.time.toFixed(2) + "s " + renderingBeats.toFixed(2) + "b", STANDARD_WIDTH / 2, height)
         // #enddefault
 
         this.dispatchEvent(new Event("drawn"));
@@ -1078,15 +1081,18 @@ export class Player extends EventTarget {
             const HOLD_BODY = chord ? respack.HOLD_BODY_HL : respack.HOLD_BODY;
             const HOLD_HEAD = chord ? respack.HOLD_HEAD_HL : respack.HOLD_HEAD;
             const HOLD_TAIL = chord ? respack.HOLD_TAIL_HL : respack.HOLD_TAIL;
-            context.drawImage(HOLD_BODY, positionX - half, (positionY - length) * ratio, size, length * ratio);
+
+            const holdSize = chord ? respack.holdHlRatio * size : size;
+            const holdHalf = holdSize / 2;
+            context.drawImage(HOLD_BODY, positionX - holdHalf, (positionY - length) * ratio, holdSize, length * ratio);
             if (!isJudging || respack.holdKeepHead) {
-                const h = size * (HOLD_HEAD.height / HOLD_HEAD.width)
-                context.drawImage(HOLD_HEAD, positionX - half, (positionY * ratio - (respack.holdCompact ? h / 2 : 0)) ,
-                    size, h);
+                const h = holdSize * (HOLD_HEAD.height / HOLD_HEAD.width)
+                context.drawImage(HOLD_HEAD, positionX - holdHalf, (positionY * ratio - (respack.holdCompact ? h / 2 : 0)) ,
+                    holdSize, h);
             }
-            const tailHeight = size * (HOLD_TAIL.height / HOLD_TAIL.width)
-            context.drawImage(HOLD_TAIL, positionX - half, (positionY - length) * ratio - (respack.holdCompact ? tailHeight / 2 : tailHeight),
-                size, tailHeight);
+            const tailHeight = holdSize * (HOLD_TAIL.height / HOLD_TAIL.width)
+            context.drawImage(HOLD_TAIL, positionX - holdHalf, (positionY - length) * ratio - (respack.holdCompact ? tailHeight / 2 : tailHeight),
+                holdSize, tailHeight);
         } else {
             respack.noteDrawer(context, positionX, positionY * ratio, size, this.noteSize, note.type, chord, note.tint);
         }

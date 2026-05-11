@@ -67,6 +67,8 @@ export class Respack {
 
     colorPerfect: number = 0xe1ffec9f;
 
+    holdHlRatio: number = 1;
+
     constructor() {
     }
     hitDrawer: (
@@ -111,13 +113,17 @@ export class Respack {
         const widths = arr.map(img => img ? img.width : 0);
         const heights = arr.map(img => img ? img.height : 0);
         const aspects = widths.map((w, i) => heights[i] / w);
+        const hlRatios = [this.TAP_HL.width / this.TAP.width, NaN, this.FLICK_HL.width / this.FLICK.width, this.DRAG_HL.width / this.DRAG.width];
         this.noteDrawer = (ctx, cx, cy, width, stdWidth, type, chord, tint) => {
             const index = type + (chord ? 4 : 0);
+            const ratio = chord ? hlRatios[type - 1] : 1;
             const img = tint ? this.getTintNote(tint, type, chord) : arr[index];
             const asp = aspects[index];
-            const height = stdWidth * asp
+            const height = stdWidth * asp * ratio;
+            width *= ratio;
             ctx.drawImage(img, cx - width / 2, cy - height / 2, width, height);
         };
+        this.holdHlRatio = this.HOLD_BODY_HL.width / this.HOLD_BODY.width;
     }
     // holdDrawer: (
     //     ctx: CanvasRenderingContext2D,
@@ -177,9 +183,9 @@ export class Respack {
         pack.HOLD_BODY = await pack.cropImage(hold, 0, meta.holdAtlas[0], hold.width, hold.height - meta.holdAtlas[1] - meta.holdAtlas[0]);
         pack.HOLD_HEAD = await pack.cropImage(hold, 0, hold.height - meta.holdAtlas[1], hold.width, meta.holdAtlas[1]);
         
-        pack.HOLD_TAIL_HL = await pack.cropImage(hold_hl, 0, 0, hold_hl.width, meta.holdAtlas[0]);
-        pack.HOLD_BODY_HL = await pack.cropImage(hold_hl, 0, meta.holdAtlas[0], hold_hl.width, hold.height - meta.holdAtlas[1] - meta.holdAtlas[0]);
-        pack.HOLD_HEAD_HL = await pack.cropImage(hold_hl, 0, hold.height - meta.holdAtlas[1], hold_hl.width, meta.holdAtlas[1]);
+        pack.HOLD_TAIL_HL = await pack.cropImage(hold_hl, 0, 0, hold_hl.width, meta.holdAtlasMH[0]);
+        pack.HOLD_BODY_HL = await pack.cropImage(hold_hl, 0, meta.holdAtlasMH[0], hold_hl.width, hold_hl.height - meta.holdAtlasMH[1] - meta.holdAtlasMH[0]);
+        pack.HOLD_HEAD_HL = await pack.cropImage(hold_hl, 0, hold_hl.height - meta.holdAtlasMH[1], hold_hl.width, meta.holdAtlasMH[1]);
 
         pack.TAP_SE = await readFile("click.ogg");
         pack.FLICK_SE = await readFile("flick.ogg");
