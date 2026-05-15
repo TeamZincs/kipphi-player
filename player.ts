@@ -222,6 +222,11 @@ export class Player extends EventTarget {
     get beats(): number {
         return this.chart.timeCalculator.secondsToBeats(this.time)
     }
+    set renderingBeats(value: number) {
+        const renderingTime = this.chart.timeCalculator.toSeconds(value);
+        const time = renderingTime - this.renderingOffset * this.audio.playbackRate;
+        this.audio.currentTime = time + this.chart.offset / 1000 - this.baseOffset;
+    }
     get renderingBeats(): number {
         // #default
         return this.chart.timeCalculator.secondsToBeats(this.renderingTime);
