@@ -33,3 +33,12 @@ export interface PhiraRespackConfig {
   colorGood?: number;
 }
 
+export interface PhiraRespackConfigExtended extends PhiraRespackConfig {
+  /** 
+   * 非标准属性
+   * 指定使用的音频格式
+   * @default "ogg"
+   */
+  useAudio?: "mp3" | "wav" | "ogg";
+}
+

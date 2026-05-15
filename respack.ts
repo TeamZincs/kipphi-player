@@ -1,7 +1,7 @@
 import YAML from "yaml";
 
 
-import { type PhiraRespackConfig } from "./respack-phira";
+import { type PhiraRespackConfig, type PhiraRespackConfigExtended } from "./respack-phira";
 import { NoteType } from "kipphi";
 
 // #default
@@ -157,7 +157,7 @@ export class Respack {
         const pack = new Respack();
 
 
-        const meta = YAML.parse(await toText(await readFile("info.yml"))) as PhiraRespackConfig;
+        const meta = YAML.parse(await toText(await readFile("info.yml"))) as PhiraRespackConfigExtended;
         pack.holdKeepHead = meta.holdKeepHead;
         pack.holdRepeat = meta.holdRepeat;
         pack.holdCompact = meta.holdCompact;
@@ -187,9 +187,10 @@ export class Respack {
         pack.HOLD_BODY_HL = await pack.cropImage(hold_hl, 0, meta.holdAtlasMH[0], hold_hl.width, hold_hl.height - meta.holdAtlasMH[1] - meta.holdAtlasMH[0]);
         pack.HOLD_HEAD_HL = await pack.cropImage(hold_hl, 0, hold_hl.height - meta.holdAtlasMH[1], hold_hl.width, meta.holdAtlasMH[1]);
 
-        pack.TAP_SE = await readFile("click.ogg");
-        pack.FLICK_SE = await readFile("flick.ogg");
-        pack.DRAG_SE = await readFile("drag.ogg");
+        const ext = meta.useAudio ?? "ogg";
+        pack.TAP_SE = await readFile(`click.${ext}`);
+        pack.FLICK_SE = await readFile(`flick.${ext}`);
+        pack.DRAG_SE = await readFile(`drag.${ext}`);
 
         pack.spawnHitDrawer();
         pack.spawnNoteDrawer();
