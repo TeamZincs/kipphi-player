@@ -540,13 +540,21 @@ export class Player extends EventTarget {
                 map.set(k, [judgeLine]);
             }
         }
-        const myMatrix = judgeLine.rotatesWithFather ? matrix.translate(x, y).rotate(-theta).scale(1, ratio) : identity.translate(transformedX, transformedY).scale(1, -1).rotate(-theta).scale(1, ratio);
+        const renderMatrix = judgeLine.rotatesWithFather
+            ? matrix
+                .translate(x, y)
+                .rotate(-theta)
+            : identity
+                .translate(transformedX, transformedY)
+                .scale(1, -1)
+                .rotate(-theta);
         //console.log( judgeLine.id, transformedX, transformedY, matrix)
         // Cache a matrix
-        judgeLine.renderMatrix = myMatrix.scale(1, 1 / ratio);
+        judgeLine.renderMatrix = renderMatrix;
+        const forChildren = renderMatrix.scale(1, ratio);
         if (judgeLine.children.size !== 0) {
             for (let line of judgeLine.children) {
-                this.precalculate(myMatrix, line, beats, seconds);
+                this.precalculate(forChildren, line, beats, seconds);
             }
         }
     }
