@@ -127,6 +127,7 @@ export class Player extends EventTarget {
     lastMeasuredFPSStr: string = "N/A (N/A, longest N/A)";
     collectedFrameTime: number = 0;
     longestFrameTime: number = 0;
+    renderedTextures: number = 0;
     // #enddefault
     showsInfo = true;
     showsLineID = false;
@@ -346,6 +347,7 @@ export class Player extends EventTarget {
         // #default
         this.map = new Map();
         const start = performance.now();
+        this.renderedTextures = 0;
         // #enddefault
         // console.time("render")
         const context = this.context;
@@ -497,7 +499,7 @@ export class Player extends EventTarget {
             this.longestFrameTime = 0;
         }
         context.textAlign = "left";
-        context.fillText(this.lastMeasuredFPSStr, 30, 25);
+        context.fillText(this.lastMeasuredFPSStr + `(${this.renderedTextures} tex)`, 30, 25);
         context.textAlign = "center";
         context.fillText(this.time.toFixed(2) + "s " + renderingBeats.toFixed(2) + "b", STANDARD_WIDTH / 2, height)
         // #enddefault
@@ -715,6 +717,7 @@ export class Player extends EventTarget {
                 context.fillRect(-scaledWidth * anchor[0], -scaledHeight * anchor[1], scaledWidth, scaledHeight)
                 // Fixes #1 on "kipphiApparatusLegacy"
             } else {
+                this.renderedTextures++;
                 const lineColor: RGB = judgeLine.extendedLayer.color?.getValueAtBySecs(beats, seconds, timeCalculator) ?? [255, 255, 255];
                 context.globalAlpha = alpha / 255;
                 const bitmap = this.textureMapping.get(textureName);
