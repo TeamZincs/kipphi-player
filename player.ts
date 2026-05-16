@@ -695,6 +695,7 @@ export class Player extends EventTarget {
             const textContent = judgeLine.extendedLayer.text.getValueAtBySecs(beats, seconds, timeCalculator) as string;
             context.save();
             context.fillStyle = rgba(...judgeLine.extendedLayer.color?.getValueAtBySecs(beats, seconds, timeCalculator) ?? [255, 255, 255], alpha);
+            context.globalAlpha = alpha / 255;
             context.font = "54px phigros";
             context.scale(scaleX, scaleY);
             context.textAlign = "center";
