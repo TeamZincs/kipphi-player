@@ -691,7 +691,7 @@ export class Player extends EventTarget {
         const hasText = !!judgeLine.extendedLayer.text;
         const hasUIAttached = judgeLine.hasAttachUI;
 
-        if (hasText) {
+        if (hasText && alpha > 0) {
             const textContent = judgeLine.extendedLayer.text.getValueAtBySecs(beats, seconds, timeCalculator) as string;
             context.save();
             context.fillStyle = rgba(...judgeLine.extendedLayer.color?.getValueAtBySecs(beats, seconds, timeCalculator) ?? [255, 255, 255], alpha);
@@ -705,7 +705,7 @@ export class Player extends EventTarget {
             context.fillText(textContent, width * (anchor[0] - 0.5), height * (anchor[1] - 0.5));
             context.restore();
         }
-        if (!hasText && !hasUIAttached) {
+        if (!hasText && !hasUIAttached && alpha > 0) {
             if (textureName === "line.png") {
                 const lineColor: RGB = judgeLine.extendedLayer.color?.getValueAtBySecs(beats, seconds, timeCalculator) ?? [200, 200, 120];
                 context.fillStyle = rgba(...(this.greenLine === judgeLine.id ? ([100, 255, 100] as RGB) : lineColor), alpha / 255)
