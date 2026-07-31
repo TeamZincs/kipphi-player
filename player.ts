@@ -18,6 +18,7 @@ import {
 /// #default
 import { AudioProcessor } from "./audio";
 /// #enddefault
+import { Tinter } from "./tinter";
 import { drawLine, innerProduct, rgb, rgba } from "./util";
 import { Coordinate, identity, Matrix33 } from "./matrix";
 import { drawNthFrame, Images } from "./image";
@@ -25,6 +26,7 @@ import { type Vector } from "./util";
 import { NOTE_HEIGHT, NOTE_WIDTH } from "./constants";
 import type { Respack } from "./respack";
 import "./polyfill";
+
 /*
 #node {
 import { Canvas, type CanvasRenderingContext2D, type Image, type ImageData, Path2D } from "skia-canvas";
@@ -46,6 +48,9 @@ declare module "kipphi" {
         transformedX: number;
         transformedY: number;
         optimized: boolean;
+        color: [number, number, number];
+        scaleX: number;
+        scaleY: number;
     }
 }
 
@@ -99,6 +104,7 @@ export class Player extends EventTarget {
     hitCanvas: OffscreenCanvas;
     context: CanvasRenderingContext2D;
     hitContext: OffscreenCanvasRenderingContext2D;
+    tinter: Tinter = new Tinter();
     chart: Chart;
     // #default
     audio: HTMLAudioElement;
@@ -415,17 +421,26 @@ export class Player extends EventTarget {
         }
         if (this.showsInfo) {
             context.save()
-            const setTransformAndAlpha = (lineOrNull: JudgeLine | null, transform: Matrix33 = identity) => {
+            const setTransformAlphaScaleColor = (lineOrNull: JudgeLine | null, fill: RGB, transform: Matrix33 = identity) => {
                 if (!lineOrNull) {
                     context.setTransform(this.baseMatrix.transform(transform).translate(STANDARD_WIDTH / 2, hh));
                 } else {
-                    context.setTransform(this.baseMatrix.transform(transform).transform(lineOrNull.renderMatrix));
+                    context.setTransform(this.baseMatrix.transform(transform).transform(lineOrNull.renderMatrix).scale(lineOrNull.scaleX, lineOrNull.scaleY));
                     context.scale(1, -1);
                     context.globalAlpha = lineOrNull.alpha / 255;
                 }
+                setColor(lineOrNull, fill)
+            }
+            const setColor = (lineOrNull: JudgeLine | null, fill: RGB) => {
+                if (!lineOrNull) {
+                    context.fillStyle = rgb(fill[0], fill[1], fill[2]);
+                } else {
+                    const color = lineOrNull.color;
+                    context.fillStyle = rgb(fill[0] * color[0] / 255, fill[1] * color[1] / 255, fill[2] * color[2] / 255);
+                }
             }
             this.computeCombo(renderingBeats);
-            context.fillStyle = "#ddd"
+            const WHITE = [255, 255, 255] as RGB;
             context.font = "32px phigros"
             context.textAlign = "left";
 
@@ -435,12 +450,12 @@ export class Player extends EventTarget {
             const hw = STANDARD_WIDTH / 2;
 
             // name
-            setTransformAndAlpha(chart.nameAttach, identity.translate(-hw + 43, hh - 34))
+            setTransformAlphaScaleColor(chart.nameAttach, WHITE, identity.translate(-hw + 43, hh - 34))
             context.fillText(title, 0, 0);
 
             // level
             context.textAlign = "right";
-            setTransformAndAlpha(chart.levelAttach, identity.translate(hw - 43, hh - 34))
+            setTransformAlphaScaleColor(chart.levelAttach, WHITE, identity.translate(hw - 43, hh - 34))
             context.fillText(level, 0, 0);
 
             context.font = "40px phigros";
@@ -448,19 +463,18 @@ export class Player extends EventTarget {
             const score = combo / chart.maxCombo * 100_0000;
             const text = score.toFixed(0).padStart(7, "0")
             context.textBaseline = "top";
-            setTransformAndAlpha(chart.scoreAttach, identity.translate(hw - 39, -hh + 30))
+            setTransformAlphaScaleColor(chart.scoreAttach, WHITE, identity.translate(hw - 39, -hh + 30))
             context.fillText(text, 0, 0);
 
             // pause
-            setTransformAndAlpha(chart.pauseAttach, identity.translate(-hw + 39, -hh + 30))
+            setTransformAlphaScaleColor(chart.pauseAttach, WHITE, identity.translate(-hw + 39, -hh + 30))
             context.fillRect(0, 2, 8, 30)
             context.fillRect(16, 2, 8, 30)
 
             // bar
             const progress = this.time / chart.duration;
             const barWidth = progress * STANDARD_WIDTH;
-            setTransformAndAlpha(chart.barAttach, identity.translate(-hw, -hh));
-            context.fillStyle = "#aaa"
+            setTransformAlphaScaleColor(chart.barAttach, [170, 170, 170], identity.translate(-hw, -hh));
             context.fillRect(0, 0, barWidth, 8)
             context.fillStyle = "#fff"
 
@@ -471,11 +485,11 @@ export class Player extends EventTarget {
                 context.textBaseline = "alphabetic";
                 
                 context.font = "64px phigros"
-                setTransformAndAlpha(chart.combonumberAttach, identity.translate(0, -hh + 50))
+                setTransformAlphaScaleColor(chart.combonumberAttach, WHITE, identity.translate(0, -hh + 50))
                 context.fillText(combo.toString(), 0, 20);
 
                 context.font = "24px phigros";
-                setTransformAndAlpha(chart.comboAttach, identity.translate(0, -hh + 95))
+                setTransformAlphaScaleColor(chart.comboAttach, WHITE, identity.translate(0, -hh + 95))
                 context.fillText(COMBO_TEXT, 0, 0);
 
 
@@ -681,6 +695,8 @@ export class Player extends EventTarget {
         // Draw Line
         const scaleX = judgeLine.extendedLayer.scaleX.getValueAtBySecs(beats, seconds, timeCalculator);
         const scaleY = judgeLine.extendedLayer.scaleY.getValueAtBySecs(beats, seconds, timeCalculator);
+        judgeLine.scaleX = scaleX;
+        judgeLine.scaleY = scaleY;
         const anchor = judgeLine.anchor;
         // console.log(scaleX, scaleY, anchor)
 
@@ -692,6 +708,7 @@ export class Player extends EventTarget {
 
         const hasText = !!judgeLine.extendedLayer.text;
         const hasUIAttached = judgeLine.hasAttachUI;
+
 
         if (hasText && alpha > 0) {
             const textContent = judgeLine.extendedLayer.text.getValueAtBySecs(beats, seconds, timeCalculator) as string;
@@ -705,12 +722,12 @@ export class Player extends EventTarget {
             const metrics = context.measureText(textContent);
             const height = metrics.actualBoundingBoxAscent + metrics.actualBoundingBoxDescent;
             const width = metrics.width;
-            context.fillText(textContent, width * (anchor[0] - 0.5), height * (anchor[1] - 0.5));
+            context.fillText(textContent, width * (-anchor[0] + 0.5), height * (anchor[1] - 0.5));
             context.restore();
         }
         if (!hasText && !hasUIAttached && alpha > 0) {
             if (textureName === "line.png") {
-                const lineColor: RGB = judgeLine.extendedLayer.color?.getValueAtBySecs(beats, seconds, timeCalculator) ?? [200, 200, 120];
+                const lineColor: RGB = judgeLine.color = judgeLine.extendedLayer.color?.getValueAtBySecs(beats, seconds, timeCalculator) ?? [200, 200, 120];
                 context.fillStyle = rgba(...(this.greenLine === judgeLine.id ? ([100, 255, 100] as RGB) : lineColor), alpha / 255)
                 const scaledWidth = BASE_LINE_LENGTH * scaleX;
                 const scaledHeight = LINE_WIDTH * scaleY;
@@ -722,17 +739,22 @@ export class Player extends EventTarget {
                 context.globalAlpha = alpha / 255;
                 const bitmap = this.textureMapping.get(textureName);
                 let texture: ImageBitmap | OffscreenCanvas = bitmap;
-                if (lineColor.some(x => x !== 255)) {
-                    texture = this.tintLineTexture(bitmap, lineColor);
-                }
+                // if (lineColor.some(x => x !== 255)) {
+                //     texture = this.tintLineTexture(bitmap, lineColor);
+                // }
                 const width = bitmap.width;
                 const height = bitmap.height;
                 const scaledWidth = width * scaleX;
                 const scaledHeight = height * scaleY;
+                this.tinter.setTint(context, lineColor);
+                console.log(context.filter)
                 context.drawImage(texture,
                     -scaledWidth * anchor[0], -scaledHeight * anchor[1], scaledWidth, scaledHeight)
                 context.globalAlpha = 1;
+                context.filter = "none";
             }
+        } else if (hasUIAttached) {
+            judgeLine.color = judgeLine.extendedLayer.color?.getValueAtBySecs(beats, seconds, timeCalculator) ?? [255, 255, 255];
         }
 
         // Draw Anchor
