@@ -13,7 +13,8 @@ import {
     NoteNode,
     NoteType,
     TC,
-    NNNodeLike
+    NNNodeLike,
+    type TimeT
 } from "kipphi";
 /// #default
 import { AudioProcessor } from "./audio";
@@ -844,6 +845,8 @@ export class Player extends EventTarget {
                     }
                     const timeRanges = speedVal !== 0 ? judgeLine.computeTimeRange(beats, timeCalculator, startY / speedVal, endY / speedVal) : [[0, Infinity] as [number, number]];
                     list.timeRanges = timeRanges;
+
+                    let lastTime: TimeT = [-1, 0, 0];
                     
                     // console.timeEnd("computeTimeRange");
                     // console.time("Rendering notes");
@@ -855,18 +858,23 @@ export class Player extends EventTarget {
                         // drawScope(judgeLine.getStackedIntegral(end, timeCalculator))
                         
                         let noteNode: NNOrTail = list.getNodeAt(start, true);
+while (noteNode.type !== NodeType.TAIL
+                            && !TC.gt(noteNode.startTime, lastTime)) {
+                            noteNode = noteNode.next;
+                        }
                         // console.log(noteNode)
                         let startBeats: number;
                         // console.log(noteNode, end, start);
                         
                         while (!(noteNode.type === NodeType.TAIL)
-                            && (startBeats = TC.toBeats(noteNode.startTime)) < end
+                            && (startBeats = TC.toBeats(noteNode.startTime)) <= end
                         ) {
                             // 判断是否为多押
                             const isChord = noteNode.notes.length > 1
                                 || noteNode.totalNode.noteNodes.some(node => node !== noteNode && node.notes.length)
                                 || noteNode.totalNode.holdNodes.some(node => node !== noteNode && node.notes.length);
                             this.renderSameTimeNotes(noteNode, isChord, judgeLine, judgeLineCover, timeCalculator, beats);
+lastTime = noteNode.startTime;
                             noteNode = noteNode.next;
                         }
                         
