@@ -100,11 +100,17 @@ const createImageBitmap = async <T>(img: T) => img;
 }
 */
 
+const HOLD_LAYER = 3;
+const DRAG_LAYER = 4;
+const TAP_LAYER = 5;
+const FLICK_LAYER = 6;
+const HIT_EFFECT_LAYER = 7;
+const NOTE_TYPE_LAYER_MAP = [null, TAP_LAYER, HOLD_LAYER, FLICK_LAYER, DRAG_LAYER]
+
 export class Player extends EventTarget {
     canvas: HTMLCanvasElement;
-    hitCanvas: OffscreenCanvas;
     context: CanvasRenderingContext2D;
-        tinter: Tinter = new Tinter('line');
+    tinter: Tinter = new Tinter('line');
     chart: Chart;
     // #default
     audio: HTMLAudioElement;
@@ -164,6 +170,9 @@ export class Player extends EventTarget {
     rootMatrix: Matrix33;
     baseMatrix: Matrix33;
     ratio: number;
+
+    // 不使用无法寻路SVG滤镜的OffscreenCanvas
+    layers: [HTMLCanvasElement, CanvasRenderingContext2D][] = new Array(8);
     
 
     public height: number;
@@ -181,8 +190,17 @@ export class Player extends EventTarget {
         this.canvas = canvas
         this.context = canvas.getContext("2d");
         this.audioProcessor = audioProcessor;
-        this.hitCanvas = new OffscreenCanvas(canvas.width, canvas.height);
-        this.hitContext = this.hitCanvas.getContext("2d");
+        const newLayer = () => {
+            const cvs = document.createElement("canvas");
+            cvs.width = canvas.width;
+            cvs.height = canvas.height;
+            return [cvs, cvs.getContext("2d")] as [HTMLCanvasElement, CanvasRenderingContext2D];
+        }
+        this.layers[3] = newLayer();
+        this.layers[4] = newLayer();
+        this.layers[5] = newLayer();
+        this.layers[6] = newLayer();
+        this.layers[7] = newLayer();
         this.background = background;
 
         this.blurringRadius = 50;
@@ -207,8 +225,11 @@ export class Player extends EventTarget {
         const ratio = this.ratio = canvas.width / STANDARD_WIDTH
         this.rootMatrix = this.baseMatrix = identity.scale(ratio, ratio);
         this.cameraRatio = this._cameraRatio; // 原地磕哒
-        this.hitCanvas.height = canvas.height;
-        this.hitCanvas.width = canvas.width;
+        for (const layer of this.layers) {
+            if (!layer) continue;
+            layer[0].height = canvas.height;
+            layer[0].width = canvas.width;
+        }
     }
     override addEventListener(type: "drawn" | "play" | "pause", listener: (e: Event) => void, options?: EventListenerOptions): void {
         super.addEventListener(type, listener, options);
@@ -363,9 +384,12 @@ export class Player extends EventTarget {
         context.setTransform(this.baseMatrix)
         context.transform(1, 0, 0, 1, STANDARD_WIDTH / 2, hh);
         context.save();
-        const hitContext = this.hitContext;
-        hitContext.setTransform(this.rootMatrix);
-        hitContext.clearRect(0, 0, STANDARD_WIDTH, height);
+        for (const layer of this.layers) {
+            if (!layer) continue;
+            const ctx = layer[1];
+            ctx.setTransform(this.rootMatrix);
+            ctx.clearRect(0, 0, STANDARD_WIDTH, height);
+        }
         // 虽然还要加个图片，但是如果不clear，在Node环境下，会泄漏很多内存
         context.clearRect(-STANDARD_WIDTH, -height, STANDARD_WIDTH * 2, height * 2);
         context.drawImage(this.blurredBackground, -STANDARD_WIDTH / 2, -hh, STANDARD_WIDTH, height);
@@ -379,6 +403,8 @@ export class Player extends EventTarget {
         context.stroke()
         context.restore()
 
+        // 打击特效图层在渲染中从不改变变换矩阵，而Note图层的矩阵一直与判定线的同步
+        this.layers[HIT_EFFECT_LAYER][1].setTransform(this.baseMatrix);
 
         context.save()
 
@@ -405,12 +431,13 @@ export class Player extends EventTarget {
             context.restore();
         }
         context.save()
-        hitContext.strokeStyle = "#66ccff";
-        hitContext.lineWidth = 5;
         // drawLine(hitContext, 0, 900, 1350, 0);
         
-        context.setTransform(this.baseMatrix);
-        context.drawImage(this.hitCanvas, 0, 0, STANDARD_WIDTH, height);
+        context.resetTransform();
+        for (const layer of this.layers) {
+            if (!layer) continue;
+            context.drawImage(layer[0], 0, 0, this.canvas.width, this.canvas.height);
+        }
         context.restore()
 
         if (this.showsLineCurve) {
@@ -688,9 +715,12 @@ export class Player extends EventTarget {
         const myMatrix = judgeLine.renderMatrix;
         const transformedX = judgeLine.transformedX;
         const transformedY = judgeLine.transformedY;
-        context.setTransform(this.baseMatrix.transform(myMatrix)/*.scale(1 / this.widthRatio, 1)*/);
-
-
+        const mat = this.baseMatrix.transform(myMatrix).scale(1, -1)
+        context.setTransform(mat);
+        this.layers[HOLD_LAYER][1].setTransform(mat);
+        this.layers[DRAG_LAYER][1].setTransform(mat);
+        this.layers[TAP_LAYER][1].setTransform(mat);
+        this.layers[FLICK_LAYER][1].setTransform(mat);
 
         // Draw Line
         const scaleX = judgeLine.extendedLayer.scaleX.getValueAtBySecs(beats, seconds, timeCalculator);
@@ -704,7 +734,6 @@ export class Player extends EventTarget {
         if (textureName !== "line.png" && !this.textureMapping.get(textureName)) {
             textureName = "line.png";
         }
-        context.scale(1, -1);
 
         const hasText = !!judgeLine.extendedLayer.text;
         const hasUIAttached = judgeLine.hasAttachUI;
@@ -734,6 +763,8 @@ export class Player extends EventTarget {
                 context.fillRect(-scaledWidth * anchor[0], -scaledHeight * anchor[1], scaledWidth, scaledHeight)
                 // Fixes #1 on "kipphiApparatusLegacy"
             } else {
+                context.save();
+                context.scale(scaleX, scaleY);
                 this.renderedTextures++;
                 const lineColor: RGB = judgeLine.extendedLayer.color?.getValueAtBySecs(beats, seconds, timeCalculator) ?? [255, 255, 255];
                 context.globalAlpha = alpha / 255;
@@ -744,14 +775,10 @@ export class Player extends EventTarget {
                 // }
                 const width = bitmap.width;
                 const height = bitmap.height;
-                const scaledWidth = width * scaleX;
-                const scaledHeight = height * scaleY;
                 this.tinter.setTint(context, lineColor);
-                console.log(context.filter)
                 context.drawImage(texture,
-                    -scaledWidth * anchor[0], -scaledHeight * anchor[1], scaledWidth, scaledHeight)
-                context.globalAlpha = 1;
-                context.filter = "none";
+                    -width * anchor[0], -height * anchor[1], width, height);
+                context.restore();
             }
         } else if (hasUIAttached) {
             judgeLine.color = judgeLine.extendedLayer.color?.getValueAtBySecs(beats, seconds, timeCalculator) ?? [255, 255, 255];
@@ -836,7 +863,6 @@ export class Player extends EventTarget {
             for (const [_, list] of trees) {
                 const speedVal: number = list.speed;
                 if (DRAWS_NOTES && alpha >= 0) {
-                    // debugger
                     // 渲染音符
                     // console.time("computeTimeRange")
                     const [startY, endY] = getYs(list.medianYOffset)
@@ -858,7 +884,7 @@ export class Player extends EventTarget {
                         // drawScope(judgeLine.getStackedIntegral(end, timeCalculator))
                         
                         let noteNode: NNOrTail = list.getNodeAt(start, true);
-while (noteNode.type !== NodeType.TAIL
+                        while (noteNode.type !== NodeType.TAIL
                             && !TC.gt(noteNode.startTime, lastTime)) {
                             noteNode = noteNode.next;
                         }
@@ -874,7 +900,7 @@ while (noteNode.type !== NodeType.TAIL
                                 || noteNode.totalNode.noteNodes.some(node => node !== noteNode && node.notes.length)
                                 || noteNode.totalNode.holdNodes.some(node => node !== noteNode && node.notes.length);
                             this.renderSameTimeNotes(noteNode, isChord, judgeLine, judgeLineCover, timeCalculator, beats);
-lastTime = noteNode.startTime;
+                            lastTime = noteNode.startTime;
                             noteNode = noteNode.next;
                         }
                         
@@ -956,7 +982,8 @@ lastTime = noteNode.startTime;
     }
     renderHitEffects(matrix: Matrix33, tree: NNList, startBeats: number, endBeats: number, timeCalculator: TimeCalculator) {
         let noteNode = tree.getNodeAt(startBeats, true);
-        const { hitContext, respack, renderingTime, hitEffectNoFollows } = this;
+        const { respack, renderingTime, hitEffectNoFollows } = this;
+        const hitContext = this.layers[HIT_EFFECT_LAYER][1];
         const line = tree.parentLine
         // console.log(hitContext.getTransform())
         const end = tree.getNodeAt(endBeats);
@@ -996,7 +1023,8 @@ lastTime = noteNode.startTime;
      */
     renderHoldHitEffects(matrix: Matrix33, tree: HNList, beats: number, startBeats: number, endBeats: number, timeCalculator: TimeCalculator) {
         const start = tree.getNodeAt(startBeats, true);
-        const { hitContext, respack, renderingTime, hitEffectNoFollows } = this;
+        const { respack, renderingTime, hitEffectNoFollows } = this;
+        const hitContext = this.layers[HIT_EFFECT_LAYER][1];
         const line = tree.parentLine
         let noteNode = start;
         const end = tree.getNodeAt(endBeats);
@@ -1093,7 +1121,7 @@ lastTime = noteNode.startTime;
             positionY = 0;
         }
         const ratio = this.heightRatio;
-        const context = this.context;
+        const context = this.layers[NOTE_TYPE_LAYER_MAP[note.type]][1];
         const respack = this.respack;
         let zero = 0;
         const positionX = note.positionX;
@@ -1204,7 +1232,7 @@ lastTime = noteNode.startTime;
         }
         this.lastUnplayedNNNode = chart.nnnList.head.next;
     }
-destroy() {
+    destroy() {
         this.tinter.destroy();
     }
 }
