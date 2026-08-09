@@ -2,7 +2,8 @@ import YAML from "yaml";
 
 
 import { type PhiraRespackConfig, type PhiraRespackConfigExtended } from "./respack-phira";
-import { NoteType } from "kipphi";
+import { hex2rgb, NoteType } from "kipphi";
+import { Tinter } from "./tinter";
 
 // #default
 const __IS_BROWSER = true;
@@ -69,7 +70,10 @@ export class Respack {
 
     holdHlRatio: number = 1;
 
+    tinter = new Tinter("note");
+
     constructor() {
+        
     }
     hitDrawer: (
         ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
@@ -86,13 +90,18 @@ export class Respack {
         const fw = this.HIT_FX.width / frames[0];
         const fh = this.HIT_FX.height / frames[1];
         const asp = fh / fw;
+        const tinter = this.tinter;
         this.hitDrawer = (ctx, cx, cy, width, time, tint) => {
             const frame = Math.floor(time / duration * totalFrames);
             const fx = frame % frames[0];
             const fy = Math.floor(frame / frames[0]);
             const height = width * asp;
-            ctx.drawImage((typeof tint === "number") ? this.getTintHitEffect(tint) : this.HIT_FX, fx * fw, fy * fh, fw, fh,
+            if (typeof tint === "number" && tint !== 0xffffff) {
+                tinter.setTint(ctx, hex2rgb(tint));
+            }
+            ctx.drawImage(this.HIT_FX, fx * fw, fy * fh, fw, fh,
                 cx - width / 2, cy - height / 2, width, height);
+            if (tint && tint !== 0xffffff) ctx.filter = "none";
         }
     }
     noteDrawer: (
@@ -114,14 +123,20 @@ export class Respack {
         const heights = arr.map(img => img ? img.height : 0);
         const aspects = widths.map((w, i) => heights[i] / w);
         const hlRatios = [this.TAP_HL.width / this.TAP.width, NaN, this.FLICK_HL.width / this.FLICK.width, this.DRAG_HL.width / this.DRAG.width];
+        const tinter = this.tinter;
         this.noteDrawer = (ctx, cx, cy, width, stdWidth, type, chord, tint) => {
             const index = type + (chord ? 4 : 0);
             const ratio = chord ? hlRatios[type - 1] : 1;
-            const img = tint ? this.getTintNote(tint, type, chord) : arr[index];
+            const img = arr[index];
             const asp = aspects[index];
             const height = stdWidth * asp * ratio;
             width *= ratio;
+            
+            if (tint && tint !== 0xffffff) {
+                tinter.setTint(ctx, hex2rgb(tint))
+            }
             ctx.drawImage(img, cx - width / 2, cy - height / 2, width, height);
+            if (tint && tint !== 0xffffff) ctx.filter = "none";
         };
         this.holdHlRatio = this.HOLD_BODY_HL.width / this.HOLD_BODY.width;
     }
@@ -251,62 +266,12 @@ export class Respack {
         return await createImageBitmap(canvas);
     }
 
-    static tintImageNonAlpha(image: CanvasDrawSource, tint: number): [OffscreenCanvas, Promise<ProcessedTexture>] {
-        const canvas = new OffscreenCanvas(image.width, image.height);
-        const context = canvas.getContext("2d");
-        context.drawImage(image, 0, 0);
-        context.globalCompositeOperation = "source-in";
-        context.fillStyle = `#${tint.toString(16).padStart(6, "0")}`;
-        context.fillRect(0, 0, image.width, image.height);
-        context.globalCompositeOperation = "multiply";
-        context.drawImage(image, 0, 0);
-        return [canvas, createImageBitmap(canvas)];
-    }
     
-    getTintNote(tint: HEX, type: NoteType, chord: boolean): ProcessedTexture {
-        const map = this.tintNotesMapping;
-        const key = tint | type << 24 | (chord ? 1 : 0) << 25; // 26位整形表示一个类型的Note贴图
-        const canBeSource = map.get(key);
-        if (canBeSource) {
-            return canBeSource;
-        }
-        const arr = [null,
-            // 1           2       3             4
-            this.TAP   , null, this.FLICK   , this.DRAG,
-            this.TAP_HL, null, this.FLICK_HL, this.DRAG_HL];
-        const original = arr[type + (chord ? 4 : 0)];
-        let [source, promisedBmp] = Respack.tintImageNonAlpha(original, tint);
-        map.set(key, source); // 在ImageBitmap创建完成之前，先使用Canvas临时代替
-        // #default
-        promisedBmp.then((bmp: ImageBitmap) => {
-            source = null;
-            map.set(key, bmp);
-        });
-        // #enddefault
-        return source;
-    }
+    
     getNoteFromType(type: NoteType) {
         const arr = [null,
             // 1           2                 3             4
             this.TAP   , this.HOLD_HEAD, this.FLICK   , this.DRAG];
         return arr[type];
-    }
-    getTintHitEffect(tint: HEX): ProcessedTexture {
-        const map = this.tintEffectMapping;
-        const key = tint;
-        const canBeSource = map.get(key);
-        if (canBeSource) {
-            return canBeSource;
-        }
-        const HIT_FX = this.HIT_FX;
-        let [source, promisedBmp] = Respack.tintImageNonAlpha(HIT_FX, tint);
-        map.set(key, source);
-// #default
-        promisedBmp.then((bmp: ImageBitmap) => {
-            source = null;
-            map.set(key, bmp);
-        });
-        // #enddefault
-        return source;
     }
 }

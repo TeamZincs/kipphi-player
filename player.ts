@@ -103,8 +103,7 @@ export class Player extends EventTarget {
     canvas: HTMLCanvasElement;
     hitCanvas: OffscreenCanvas;
     context: CanvasRenderingContext2D;
-    hitContext: OffscreenCanvasRenderingContext2D;
-    tinter: Tinter = new Tinter();
+        tinter: Tinter = new Tinter('line');
     chart: Chart;
     // #default
     audio: HTMLAudioElement;
@@ -1196,6 +1195,9 @@ export class Player extends EventTarget {
             })
         }
         this.lastUnplayedNNNode = chart.nnnList.head.next;
+    }
+destroy() {
+        this.tinter.destroy();
     }
 }
 
