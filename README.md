@@ -18,7 +18,7 @@ In addition, when calculating combos and playing sounds, the cursor optimization
 
 最简单用例：
 ```typescript
-import { Player, AudioProcessor, Images, Respack } from "kipphi-player";
+import { Player, AudioProcessor, Images, Respack, setWasmPath } from "kipphi-player";
 import { Chart } from "kipphi";
 
 await Images.loadAndOptimize({
@@ -57,9 +57,13 @@ const chart = Chart.fromKPAJSON(await (await fetch(`charts/${name}/chart.json`))
 
 const player = new Player(canvas, audioProcessor, audio, background);
 
-player.receive(chart, async (textureName) => {
+setWasmPath(...); // web-demuxer所用的WASM文件，如果不需要BGA功能无需设置。
+
+await player.receive(chart, async (textureName) => {
     // 自行实现纹理加载逻辑（在前端，需要的是Blob）
     // 不需要纹理的话返回undefined或者null即可
+    return ...
+}, async (videoName) => {
     return ...
 })
 document.onclick = () => {
@@ -95,3 +99,6 @@ export async function renderChartFast(
     fps: number;
 }>;
 ```
+
+## 许可
+本项目基于MIT许可发布。如果您需要背景视频，请在 `web-demuxer` 项目下获得由 FFMPEG 源码编译而来的、按照 LGPL 许可发布的 WASM 文件。
