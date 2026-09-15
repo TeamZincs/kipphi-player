@@ -38,6 +38,16 @@ ${color[0] / 255} 0 0 0 0
         // 应用滤镜
         ctx.filter = `url("#multiply-filter-${this.id}")`;
     }
+    setDim(ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, dim: number) {
+        const ratio = 1 - dim;
+        this.matrix.setAttribute('values', `
+${ratio} 0 0 0 0
+0 ${ratio} 0 0 0
+0 0 ${ratio} 0 0
+0 0 0 1 0
+        `)
+        ctx.filter = `url("#multiply-filter-${this.id}")`;
+    }
     destroy() {
         this.svg.remove();
     }

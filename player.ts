@@ -14,7 +14,8 @@ import {
     NoteType,
     TC,
     NNNodeLike,
-    type TimeT
+    type TimeT,
+    VideoScale
 } from "kipphi";
 /// #default
 import { AudioProcessor } from "./audio";
@@ -27,6 +28,7 @@ import { type Vector } from "./util";
 import { NOTE_HEIGHT, NOTE_WIDTH } from "./constants";
 import type { Respack } from "./respack";
 import "./polyfill";
+import type { VideoFrameSource } from "./video";
 
 /*
 #node {
@@ -166,6 +168,7 @@ export class Player extends EventTarget {
 
     
     textureMapping: Map<string, ImageBitmap> = new Map();
+videoMapping: Map<string, VideoFrameSource> = new Map();
 
     rootMatrix: Matrix33;
     baseMatrix: Matrix33;
@@ -371,13 +374,16 @@ export class Player extends EventTarget {
         if (!ENABLE_PLAYER) {
             return;
         }
+
         // #default
         this.map = new Map();
         const start = performance.now();
         this.renderedTextures = 0;
         // #enddefault
-        // console.time("render")
-        const context = this.context;
+                const context = this.context;
+const chart = this.chart;
+        const renderingBeats = this.renderingBeats;
+        const renderingTime = this.renderingTime;
 
         const height = this.height;
         const hh = height / 2;
@@ -395,7 +401,57 @@ export class Player extends EventTarget {
         context.drawImage(this.blurredBackground, -STANDARD_WIDTH / 2, -hh, STANDARD_WIDTH, height);
         // 涂灰色（背景变暗）
         context.fillStyle = "#0008";
-        context.fillRect(-27000, -18000, 54000, 36000)
+        context.fillRect(-27000, -18000, 54000, 36000);
+
+        (() => {
+            if (!chart.video) {
+                return;
+            }
+            const tinter = this.tinter;
+            const timeCalculator = this.chart.timeCalculator;
+            const videoNode = chart.video.name.getNodeAt(renderingBeats);
+            const video = videoNode.value;
+            const videoScale = videoNode.scale;
+            const dim = chart.video.dim.getValueAt(renderingBeats);
+            const alpha = chart.video.alpha.getValueAt(renderingBeats);
+            context.save()
+            context.globalAlpha = alpha; // 不用除以255
+            tinter.setDim(context, dim);
+            const name = video.trim();
+            if (name === "" || !this.videoMapping.has(name)) {
+                return;
+            }
+            const videoEle = this.videoMapping.get(video);
+            const fr = videoEle.getFrame(renderingTime - timeCalculator.toSeconds(TC.toBeats(videoNode.time)));
+            if (!fr) {
+                return;
+            }
+            const origWidth = fr.displayWidth;
+            const origHeight = fr.displayHeight;
+            switch (videoScale) {
+                case VideoScale.cropCenter:{
+                    const ratio = (origWidth / origHeight) > (STANDARD_WIDTH / height) ? (height / origHeight) : (STANDARD_WIDTH / origWidth);
+                    const h = origHeight * ratio;
+                    const w = origWidth * ratio;
+                    context.drawImage(fr, -w / 2, -h / 2, w, h);
+                    break;
+                }
+                case VideoScale.fit:{
+                    context.drawImage(fr, -STANDARD_WIDTH / 2, -height / 2, STANDARD_WIDTH, height);
+                    break;
+                }
+                case VideoScale.inside:{
+                    const ratio = (origWidth / origHeight) < (STANDARD_WIDTH / height) ? (height / origHeight) : (STANDARD_WIDTH / origWidth);
+                    const h = origHeight * ratio;
+                    const w = origWidth * ratio;
+                    context.drawImage(fr, -w / 2, -h / 2, w, h);
+                }
+            }
+            
+            context.restore()
+        })();
+
+
         // 画出渲染范围圆
         context.strokeStyle = "#66ccff";
         context.beginPath();
@@ -412,13 +468,10 @@ export class Player extends EventTarget {
         // drawLine(context, -1350, 0, 1350, 0)
         // drawLine(context, 0, 900, 0, -900);
         context.restore();
-        const renderingBeats = this.renderingBeats;
-        const renderingTime = this.renderingTime;
-
+        
         
         // console.log("rendering")
-        const chart = this.chart;
-        const lineQueue = [...chart.judgeLines].sort((a, b) => (a.zOrder ?? 0) - (b.zOrder ?? 0));
+                const lineQueue = [...chart.judgeLines].sort((a, b) => (a.zOrder ?? 0) - (b.zOrder ?? 0));
         for (let line of this.chart.orphanLines) {
             this.precalculate(identity.translate(STANDARD_WIDTH / 2, hh).scale(1, -this.heightRatio), line, renderingBeats, renderingTime);
         }
