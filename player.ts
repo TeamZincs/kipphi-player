@@ -107,6 +107,7 @@ const DRAG_LAYER = 4;
 const TAP_LAYER = 5;
 const FLICK_LAYER = 6;
 const HIT_EFFECT_LAYER = 7;
+const TEXTURE_BOUNDS_LAYER = 8;
 const NOTE_TYPE_LAYER_MAP = [null, TAP_LAYER, HOLD_LAYER, FLICK_LAYER, DRAG_LAYER]
 
 export class Player extends EventTarget {
@@ -168,14 +169,14 @@ export class Player extends EventTarget {
 
     
     textureMapping: Map<string, ImageBitmap> = new Map();
-videoMapping: Map<string, VideoFrameSource> = new Map();
+    videoMapping: Map<string, VideoFrameSource> = new Map();
 
     rootMatrix: Matrix33;
     baseMatrix: Matrix33;
     ratio: number;
 
     // 不使用无法寻路SVG滤镜的OffscreenCanvas
-    layers: [HTMLCanvasElement, CanvasRenderingContext2D][] = new Array(8);
+    layers: [HTMLCanvasElement, CanvasRenderingContext2D][] = new Array(9);
     
 
     public height: number;
@@ -204,6 +205,7 @@ videoMapping: Map<string, VideoFrameSource> = new Map();
         this.layers[5] = newLayer();
         this.layers[6] = newLayer();
         this.layers[7] = newLayer();
+        this.layers[8] = newLayer();
         this.background = background;
 
         this.blurringRadius = 50;
@@ -380,8 +382,8 @@ videoMapping: Map<string, VideoFrameSource> = new Map();
         const start = performance.now();
         this.renderedTextures = 0;
         // #enddefault
-                const context = this.context;
-const chart = this.chart;
+        const context = this.context;
+        const chart = this.chart;
         const renderingBeats = this.renderingBeats;
         const renderingTime = this.renderingTime;
 
@@ -468,10 +470,10 @@ const chart = this.chart;
         // drawLine(context, -1350, 0, 1350, 0)
         // drawLine(context, 0, 900, 0, -900);
         context.restore();
-        
+
         
         // console.log("rendering")
-                const lineQueue = [...chart.judgeLines].sort((a, b) => (a.zOrder ?? 0) - (b.zOrder ?? 0));
+        const lineQueue = [...chart.judgeLines].sort((a, b) => (a.zOrder ?? 0) - (b.zOrder ?? 0));
         for (let line of this.chart.orphanLines) {
             this.precalculate(identity.translate(STANDARD_WIDTH / 2, hh).scale(1, -this.heightRatio), line, renderingBeats, renderingTime);
         }
@@ -738,6 +740,7 @@ const chart = this.chart;
         context.save();
         context.setTransform(this.baseMatrix);
         context.font = "30px phigros"
+        context.fillStyle = "white";
         for (const [_, lines] of map) {
             const x = lines[0].transformedX;
             const y = lines[0].transformedY;
@@ -774,6 +777,7 @@ const chart = this.chart;
         this.layers[DRAG_LAYER][1].setTransform(mat);
         this.layers[TAP_LAYER][1].setTransform(mat);
         this.layers[FLICK_LAYER][1].setTransform(mat);
+        this.layers[TEXTURE_BOUNDS_LAYER][1].setTransform(mat);
 
         // Draw Line
         const scaleX = judgeLine.extendedLayer.scaleX.getValueAtBySecs(beats, seconds, timeCalculator);
@@ -831,6 +835,18 @@ const chart = this.chart;
                 this.tinter.setTint(context, lineColor);
                 context.drawImage(texture,
                     -width * anchor[0], -height * anchor[1], width, height);
+                if (this.showsLineID || this.greenLine === judgeLine.id) {
+                    const context = this.layers[TEXTURE_BOUNDS_LAYER][1];
+                    context.strokeStyle = this.greenLine === judgeLine.id ? "rgb(100, 255, 100)" : "#FFF4";
+                    context.lineWidth = 3;
+                    context.setLineDash([20, 10, 5, 10]);
+                    context.strokeRect(-width * anchor[0] * scaleX, -height * anchor[1] * scaleY, width * scaleX, height * scaleY);
+                    context.setLineDash([10, 35])
+                    drawLine(context, 0, 0, width * -anchor[0] * scaleX, height * -anchor[1] * scaleY)
+                    drawLine(context, 0, 0, width * -anchor[0] * scaleX, height * (1-anchor[1]) * scaleY)
+                    drawLine(context, 0, 0, width * (1-anchor[0]) * scaleX, height * -anchor[1] * scaleY)
+                    drawLine(context, 0, 0, width * (1-anchor[0]) * scaleX, height * (1-anchor[1]) * scaleY)
+                }
                 context.restore();
             }
         } else if (hasUIAttached) {
@@ -1272,18 +1288,24 @@ const chart = this.chart;
     }
     // #enddefault
 
-    receive(chart: Chart, textureFetcher: (name: string) => Promise<ImageBitmap>) {
+    async receive(chart: Chart, textureFetcher: (name: string) => Promise<ImageBitmap>, videoFetcher: (name: string) => Promise<VideoFrameSource>) {
         this.chart = chart;
+
+        this.lastUnplayedNNNode = chart.nnnList.head.next;
         // 还是播放器适合处理纹理请求这事（
 
         const textures = chart.scanAllTextures();
         textures.delete("line.png");
         for (const texture of textures) {
-            textureFetcher(texture).then((bmp: ImageBitmap) => {
-                this.textureMapping.set(texture, bmp);
-            })
+            const bmp = await textureFetcher(texture);
+            this.textureMapping.set(texture, bmp);    
         }
-        this.lastUnplayedNNNode = chart.nnnList.head.next;
+
+        const videos = chart.scanAllVideos();
+        for (const video of videos) {
+            const vid = await videoFetcher(video)
+            this.videoMapping.set(video, vid);    
+        }
     }
     destroy() {
         this.tinter.destroy();
