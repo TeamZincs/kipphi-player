@@ -55,7 +55,10 @@ const canvas = document.getElementById("canvas") as HTMLCanvasElement;
 // 也可以渲染RPE谱面，自己选择
 const chart = Chart.fromKPAJSON(await (await fetch(`charts/${name}/chart.json`)).json());
 
-const player = new Player(canvas, audioProcessor, audio, background);
+// 后端异步初始化，所以用工厂方法而不是 new（详见下一节）
+const player = await Player.create(canvas, audioProcessor, audio, background, respack, {
+    renderer: "auto",
+});
 
 setWasmPath(...); // web-demuxer所用的WASM文件，如果不需要BGA功能无需设置。
 
@@ -76,6 +79,68 @@ document.onclick = () => {
 player.audioProcessor.volume = 2.0;
 
 ```
+
+## 浏览器端的渲染后端
+
+浏览器里默认走 GPU：每帧先把绘制记录成实例，`flush()` 时统一按 z 排序、合批，再实例化绘制。后端优先级是 **WebGPU → WebGL 1 → Canvas 2D**。
+
+因为要 `await` 初始化（WebGPU 要拿 device），构造函数做不到，所以入口是静态工厂：
+
+```typescript
+const player = await Player.create(canvas, audioProcessor, audio, background, respack, {
+    renderer: "auto",   // 默认
+});
+
+console.log(player.rendererName); // "WebGPU" / "WebGL 1" / "Canvas 2D"
+```
+
+`renderer` 可选：
+
+| 值 | 行为 |
+| --- | --- |
+| `"auto"`（默认） | WebGPU → WebGL 1 → Canvas 2D |
+| `"webgpu"` | 明确想要 WebGPU，拿不到时同样会往后退 |
+| `"webgl1"` | 优先 WebGL 1，不会尝试 WebGPU |
+| `"canvas2d"` | 只用 Canvas 2D（与旧版本行为一致） |
+
+拿不到指定的后端不会抛错，只会在控制台 warn 然后降级。直接 `new Player(...)` 仍然能用，但只会得到 Canvas 2D。
+
+GPU 模式下 FPS 那一行会多显示平均 draw call 数，例如：
+
+```
+45.0 (avg 18.20ms, max 42.10ms)(5 tex, 14.0 dc, WebGPU)
+```
+
+排查卡顿可以打开 `Player.debugTiming = true`，每帧会打印 `记录 / 提交` 耗时和实例数。想整体关掉 GPU 就用 `Player.gpuEnabled = false`。
+
+## 单独使用 GPU 2D 上下文
+
+`context.ts` 里的 `AnyGPUContext2D` 不依赖 Player，可以单独用：
+
+```typescript
+import { AnyGPUContext2D } from "kipphi-player";
+
+const gpu = await AnyGPUContext2D.create({ canvas, zRange: [0, 10] });
+
+const background = gpu.createLayer(0);
+const notes = gpu.createLayer(5);
+
+background.fillStyle = "#101018";
+background.fillRect(0, 0, gpu.width, gpu.height);
+
+notes.tint = [255, 128, 128];   // 0..255 三元组，和 fillStyle 一样是状态机
+notes.drawImage(noteBitmap, 10, 20, 64, 64);
+notes.z = 6;                    // 手动指定另一个 z
+
+gpu.flush();                    // 排序 + 合批 + 实例化绘制，并清空图层记录
+```
+
+- 图层的 API 与 `CanvasRenderingContext2D` 基本一致，另外多了 `tint` 和 `z`
+- 绘制全部是延迟的，`flush()` 时才提交；同一帧内按 z **稳定排序**，z 相同则保持记录顺序
+- z 的归一化完全在着色器里做：顶点着色器只收 `zMin` 和 `1/(zMax-zMin)`，CPU 侧不碰归一化后的值
+- 每个图层、每个绘制实例都可以使用不同的纹理与混合模式（`source-over` / `destination-out` / `lighter`），连续的相同组合会被合成一次 draw call
+
+已知取舍：不支持渐变、pattern、阴影、`clip`、`Path2D`；自相交多边形按简单多边形三角化；描边拐角用方补角近似，半透明描边重叠处会被叠加两次。
 
 ## 用于后端
 得益于 `skia-canvas`，奇谱播放器也可用于Node.js或Bun等后端运行环境。

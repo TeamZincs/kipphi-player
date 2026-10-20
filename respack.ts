@@ -4,6 +4,9 @@ import YAML from "yaml";
 import { type PhiraRespackConfig, type PhiraRespackConfigExtended } from "./respack-phira";
 import { hex2rgb, NoteType } from "kipphi";
 import { Tinter } from "./tinter";
+// #default
+import type { LayerContext2D } from "./context";
+// #enddefault
 
 // #default
 const __IS_BROWSER = true;
@@ -15,6 +18,17 @@ const toText = (blob: Blob) => blob.text();
 // #enddefault
 
 type HEX = number;
+
+/**
+ * 画音符 / 打击特效用的上下文。
+ * 浏览器端可能是 GPU 图层（LayerContext2D），Node 端是 skia-canvas 的 2D 上下文。
+ */
+// #default
+type NoteDrawContext = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | LayerContext2D;
+// #enddefault
+/* #node {
+type NoteDrawContext = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+} */
 
 
 /*
@@ -76,7 +90,7 @@ export class Respack {
         
     }
     hitDrawer: (
-        ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+        ctx: NoteDrawContext,
         cx: number,
         cy: number,
         width: number,
@@ -101,11 +115,11 @@ export class Respack {
             }
             ctx.drawImage(this.HIT_FX, fx * fw, fy * fh, fw, fh,
                 cx - width / 2, cy - height / 2, width, height);
-            if (tint && tint !== 0xffffff) ctx.filter = "none";
+            if (tint && tint !== 0xffffff) tinter.clearTint(ctx);
         }
     }
     noteDrawer: (
-        ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+        ctx: NoteDrawContext,
         cx: number,
         cy: number,
         width: number,
@@ -136,7 +150,7 @@ export class Respack {
                 tinter.setTint(ctx, hex2rgb(tint))
             }
             ctx.drawImage(img, cx - width / 2, cy - height / 2, width, height);
-            if (tint && tint !== 0xffffff) ctx.filter = "none";
+            if (tint && tint !== 0xffffff) tinter.clearTint(ctx);
         };
         this.holdHlRatio = this.HOLD_BODY_HL.width / this.HOLD_BODY.width;
     }

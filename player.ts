@@ -32,10 +32,36 @@ import type { VideoFrameSource } from "./video";
 
 /*
 #node {
-import { Canvas, type CanvasRenderingContext2D, type Image, type ImageData, Path2D } from "skia-canvas";
+import { Canvas, type CanvasRenderingContext2D, type Image, type ImageData } from "skia-canvas";
 import { AudioProcessor } from "./audioProcessor";
 }
 */
+// #default
+import { AnyGPUContext2D, type LayerContext2D } from "./context";
+// #enddefault
+
+/**
+ * 绘图上下文：
+ * - 浏览器：`LayerContext2D`（GPU 图层，合批 + 实例化绘制）
+ * - Node：skia-canvas 的 `CanvasRenderingContext2D`
+ */
+type PlayContext2D = CanvasRenderingContext2D
+// #default
+    | LayerContext2D
+// #enddefault
+    ;
+
+/**
+ * GPU 上下文的类型。
+ * 浏览器端就是 `AnyGPUContext2D`；Node 端没有 GPU 后端，占用一个 any 占位，
+ * 这样共享代码里的 `this.gpu` 在浏览器端仍然是有类型的。
+ */
+// #default
+type GPUContext2D = AnyGPUContext2D;
+// #enddefault
+/* #node {
+type GPUContext2D = any;
+} */
 
 const HOLD_HE_SPEED = 2;
 const HOLD_HE_INTERVAL = 1 / HOLD_HE_SPEED;
@@ -69,14 +95,7 @@ const RENDER_SCOPE = 1000;
 const COMBO_TEXT = "KIPPHI";
 
 
-const CURVE_NODE_PATH = new Path2D();
-
-CURVE_NODE_PATH.moveTo(-5, -5);
-CURVE_NODE_PATH.lineTo(-5, 5);
-CURVE_NODE_PATH.lineTo(5, 5);
-CURVE_NODE_PATH.lineTo(5, -5);
-CURVE_NODE_PATH.lineTo(0, -14);
-CURVE_NODE_PATH.closePath();
+const CURVE_NODE_SHAPE: [number, number][] = [[-5, -5], [-5, 5], [5, 5], [5, -5], [0, -14]];
 
 const STANDARD_WIDTH =  1350;
 const STANDARD_HEIGHT = 900;
@@ -109,10 +128,44 @@ const FLICK_LAYER = 6;
 const HIT_EFFECT_LAYER = 7;
 const TEXTURE_BOUNDS_LAYER = 8;
 const NOTE_TYPE_LAYER_MAP = [null, TAP_LAYER, HOLD_LAYER, FLICK_LAYER, DRAG_LAYER]
+/** GPU 模式：图层下标直接当 z 用，0 是底图/判定线，3~8 是音符层，9 是覆盖层 */
+const GPU_Z_BASE = 0;
+const GPU_Z_OVERLAY = 9;
+const GPU_Z_MAX = 10;
+const NO_LAYER_INDICES = [HOLD_LAYER, DRAG_LAYER, TAP_LAYER, FLICK_LAYER, HIT_EFFECT_LAYER, TEXTURE_BOUNDS_LAYER];
+
+/** 渲染后端优先级 */
+export type RendererPreference = "auto" | "webgpu" | "webgl1" | "canvas2d";
+
+export interface PlayerOptions {
+    /**
+     * 渲染后端优先级：
+     * - `auto`（默认）：WebGPU → WebGL 1 → Canvas 2D
+     * - `webgpu`：明确想要 WebGPU（拿不到时同样会往后退）
+     * - `webgl1`：优先 WebGL 1，不行再退 Canvas 2D
+     * - `canvas2d`：只用 Canvas 2D
+     */
+    renderer?: RendererPreference;
+    /** 复用外部创建好的 GPUDevice（仅 WebGPU 有效） */
+    device?: unknown;
+    /** GPU 图层的 z 范围，默认 `[0, 10]` */
+    zRange?: [number, number];
+}
 
 export class Player extends EventTarget {
     canvas: HTMLCanvasElement;
-    context: CanvasRenderingContext2D;
+    context: PlayContext2D;
+    /** 覆盖层（进度条、combo、FPS 等）；GPU 模式下是 z 最高的图层 */
+    overlayContext: PlayContext2D;
+    /**
+     * GPU 上下文（仅浏览器）。
+     * 为 null 时退回 Canvas 2D —— Node 端恒为 null。
+     */
+    gpu: GPUContext2D | null = null;
+    /** 浏览器端是否尝试走 GPU 后端，失败会自动退回 Canvas 2D */
+    static gpuEnabled = true;
+    /** 打开后在控制台输出每帧的 记录/提交 耗时，用来找卡顿 */
+    static debugTiming = false;
     tinter: Tinter = new Tinter('line');
     chart: Chart;
     // #default
@@ -143,6 +196,11 @@ export class Player extends EventTarget {
     collectedFrameTime: number = 0;
     longestFrameTime: number = 0;
     renderedTextures: number = 0;
+    /** 上一帧的 draw call 数（GPU 模式；Canvas 2D 恒为 0） */
+    lastDrawCalls: number = 0;
+    /** 最近一个统计窗口内平均每帧的 draw call 数，显示用 */
+    averageDrawCalls: number = 0;
+    private drawCallsInWindow: number = 0;
     // #enddefault
     showsInfo = true;
     showsLineID = false;
@@ -176,11 +234,18 @@ export class Player extends EventTarget {
     ratio: number;
 
     // 不使用无法寻路SVG滤镜的OffscreenCanvas
-    layers: [HTMLCanvasElement, CanvasRenderingContext2D][] = new Array(9);
+    // GPU 模式下第一项为 null（不需要中间画布），第二项是 LayerContext2D
+    layers: [HTMLCanvasElement | null, PlayContext2D][] = new Array(9);
     
 
     public height: number;
 
+    /**
+     * 直接用构造函数只会得到 Canvas 2D —— 浏览器端的 GPU 后端需要 await 初始化，
+     * 而构造函数不能是异步的。请改用 `await Player.create(...)`。
+     *
+     * 这个构造函数保留下来是给 Node 渲染端（skia-canvas）和「我就是想用 2D」的场景用的。
+     */
     constructor(
         canvas: HTMLCanvasElement,
         audioProcessor: AudioProcessor,
@@ -188,24 +253,37 @@ export class Player extends EventTarget {
         audio: HTMLAudioElement,
         // #enddefault
         background: ImageBitmap,
-        public respack: Respack
+        public respack: Respack,
+        options: PlayerOptions & { gpu?: GPUContext2D } = {},
     ) {
         super();
         this.canvas = canvas
-        this.context = canvas.getContext("2d");
         this.audioProcessor = audioProcessor;
-        const newLayer = () => {
-            const cvs = document.createElement("canvas");
-            cvs.width = canvas.width;
-            cvs.height = canvas.height;
-            return [cvs, cvs.getContext("2d")] as [HTMLCanvasElement, CanvasRenderingContext2D];
+
+        // #default
+        this.gpu = options.gpu ?? null;
+        // #enddefault
+
+        if (this.gpu) {
+            // 图层直接就是 GPU 图层，按 z 排序，不再需要中间画布
+            this.context = this.gpu.createLayer(GPU_Z_BASE);
+            this.overlayContext = this.gpu.createLayer(GPU_Z_OVERLAY);
+            for (const index of NO_LAYER_INDICES) {
+                this.layers[index] = [null, this.gpu.createLayer(index)];
+            }
+        } else {
+            this.context = canvas.getContext("2d");
+            this.overlayContext = this.context;
+            const newLayer = () => {
+                const cvs = document.createElement("canvas");
+                cvs.width = canvas.width;
+                cvs.height = canvas.height;
+                return [cvs, cvs.getContext("2d")] as [HTMLCanvasElement, CanvasRenderingContext2D];
+            }
+            for (const index of NO_LAYER_INDICES) {
+                this.layers[index] = newLayer();
+            }
         }
-        this.layers[3] = newLayer();
-        this.layers[4] = newLayer();
-        this.layers[5] = newLayer();
-        this.layers[6] = newLayer();
-        this.layers[7] = newLayer();
-        this.layers[8] = newLayer();
         this.background = background;
 
         this.blurringRadius = 50;
@@ -223,6 +301,57 @@ export class Player extends EventTarget {
         })
         // #enddefault
     }
+
+    /**
+     * 创建播放器的唯一推荐入口。
+     *
+     * 浏览器端按 `options.renderer` 选后端（默认 `auto`：WebGPU → WebGL 1 → Canvas 2D），
+     * 失败会自动往后退，不会抛错；Node 端固定 Canvas 2D。
+     *
+     * ```ts
+     * const player = await Player.create(canvas, audioProcessor, audio, background, respack, {
+     *     renderer: "webgl1",
+     * });
+     * ```
+     */
+    static async create(
+        canvas: HTMLCanvasElement,
+        audioProcessor: AudioProcessor,
+        // #default
+        audio: HTMLAudioElement,
+        // #enddefault
+        background: ImageBitmap,
+        respack: Respack,
+        options: PlayerOptions = {},
+    ): Promise<Player> {
+        // #default
+        const preference = options.renderer ?? "auto";
+        if (Player.gpuEnabled && preference !== "canvas2d") {
+            try {
+                const gpu = await AnyGPUContext2D.create({
+                    canvas,
+                    // 'webgl1' 就只试 WebGL 1；其余交给 auto（WebGPU 失败会自动退 WebGL 1）
+                    backend: preference === "webgl1" ? "webgl1" : "auto",
+                    zRange: options.zRange ?? [0, GPU_Z_MAX],
+                    clearColor: [0, 0, 0, 0],
+                    device: options.device,
+                });
+                return new Player(canvas, audioProcessor, audio, background, respack, { ...options, gpu });
+            } catch (error) {
+                if (preference !== "auto") {
+                    console.warn(`[Player] ${preference} 后端不可用，退回 Canvas 2D:`, error);
+                }
+            }
+        }
+        // #enddefault
+        // #default
+        return new Player(canvas, audioProcessor, audio, background, respack, { ...options, gpu: null });
+        // #enddefault
+        /* #node {
+        return new Player(canvas, audioProcessor, background, respack, { ...options, gpu: null });
+        } */
+    }
+
     useNewAspect() {
         const canvas = this.canvas;
         const height = this.height = canvas.height / canvas.width * STANDARD_WIDTH;
@@ -230,14 +359,20 @@ export class Player extends EventTarget {
         const ratio = this.ratio = canvas.width / STANDARD_WIDTH
         this.rootMatrix = this.baseMatrix = identity.scale(ratio, ratio);
         this.cameraRatio = this._cameraRatio; // 原地磕哒
+        if (this.gpu) this.gpu.resize(canvas.width, canvas.height);
         for (const layer of this.layers) {
-            if (!layer) continue;
+            if (!layer || !layer[0]) continue;
             layer[0].height = canvas.height;
             layer[0].width = canvas.width;
         }
     }
     override addEventListener(type: "drawn" | "play" | "pause", listener: (e: Event) => void, options?: EventListenerOptions): void {
         super.addEventListener(type, listener, options);
+    }
+    /** 当前渲染后端的展示名（Node 端恒为 Canvas 2D） */
+    get rendererName(): string {
+        if (!this.gpu) return "Canvas 2D";
+        return this.gpu.kind === "webgpu" ? "WebGPU" : "WebGL 1";
     }
 /* #node {
 
@@ -390,16 +525,19 @@ export class Player extends EventTarget {
         const height = this.height;
         const hh = height / 2;
         context.setTransform(this.baseMatrix)
-        context.transform(1, 0, 0, 1, STANDARD_WIDTH / 2, hh);
+        context.translate(STANDARD_WIDTH / 2, hh);
         context.save();
-        for (const layer of this.layers) {
-            if (!layer) continue;
-            const ctx = layer[1];
-            ctx.setTransform(this.rootMatrix);
-            ctx.clearRect(0, 0, STANDARD_WIDTH, height);
+        if (!this.gpu) {
+            // GPU 模式下每帧 flush 时会自动重新开始，不需要手动清图层
+            for (const layer of this.layers) {
+                if (!layer) continue;
+                const ctx = layer[1];
+                ctx.setTransform(this.rootMatrix);
+                ctx.clearRect(0, 0, STANDARD_WIDTH, height);
+            }
+            // 虽然还要加个图片，但是如果不clear，在Node环境下，会泄漏很多内存
+            context.clearRect(-STANDARD_WIDTH, -height, STANDARD_WIDTH * 2, height * 2);
         }
-        // 虽然还要加个图片，但是如果不clear，在Node环境下，会泄漏很多内存
-        context.clearRect(-STANDARD_WIDTH, -height, STANDARD_WIDTH * 2, height * 2);
         context.drawImage(this.blurredBackground, -STANDARD_WIDTH / 2, -hh, STANDARD_WIDTH, height);
         // 涂灰色（背景变暗）
         context.fillStyle = "#0008";
@@ -416,18 +554,20 @@ export class Player extends EventTarget {
             const videoScale = videoNode.scale;
             const dim = chart.video.dim.getValueAt(renderingBeats);
             const alpha = chart.video.alpha.getValueAt(renderingBeats);
-            context.save()
-            context.globalAlpha = alpha; // 不用除以255
-            tinter.setDim(context, dim);
             const name = video.trim();
             if (name === "" || !this.videoMapping.has(name)) {
                 return;
             }
-            const videoEle = this.videoMapping.get(video);
+            const videoEle = this.videoMapping.get(name);
             const fr = videoEle.getFrame(renderingTime - timeCalculator.toSeconds(TC.toBeats(videoNode.time)));
             if (!fr) {
                 return;
             }
+            // 注意 save/restore 必须配对：GPU 模式下 tint 也在状态机里，
+            // 提前 return 会把 dim/alpha 泄漏到后面的判定线和音符上
+            context.save()
+            context.globalAlpha = alpha; // 不用除以255
+            tinter.setDim(context, dim);
             const origWidth = fr.displayWidth;
             const origHeight = fr.displayHeight;
             switch (videoScale) {
@@ -487,11 +627,14 @@ export class Player extends EventTarget {
         }
         context.save()
         // drawLine(hitContext, 0, 900, 1350, 0);
-        
-        context.resetTransform();
-        for (const layer of this.layers) {
-            if (!layer) continue;
-            context.drawImage(layer[0], 0, 0, this.canvas.width, this.canvas.height);
+
+        if (!this.gpu) {
+            // GPU 模式下图层各自带 z，交给 GPU 排序，不需要手动合成
+            context.resetTransform();
+            for (const layer of this.layers) {
+                if (!layer) continue;
+                context.drawImage(layer[0], 0, 0, this.canvas.width, this.canvas.height);
+            }
         }
         context.restore()
 
@@ -501,30 +644,33 @@ export class Player extends EventTarget {
         if (this.showsLineID) {
             this.renderLineIDs();
         }
+
+        // 覆盖层：2D 模式下就是主上下文，GPU 模式下是 z 最高的图层
+        const overlay = this.overlayContext;
         if (this.showsInfo) {
-            context.save()
+            overlay.save()
             const setTransformAlphaScaleColor = (lineOrNull: JudgeLine | null, fill: RGB, transform: Matrix33 = identity) => {
                 if (!lineOrNull) {
-                    context.setTransform(this.baseMatrix.transform(transform).translate(STANDARD_WIDTH / 2, hh));
+                    overlay.setTransform(this.baseMatrix.transform(transform).translate(STANDARD_WIDTH / 2, hh));
                 } else {
-                    context.setTransform(this.baseMatrix.transform(transform).transform(lineOrNull.renderMatrix).scale(lineOrNull.scaleX, lineOrNull.scaleY));
-                    context.scale(1, -1);
-                    context.globalAlpha = lineOrNull.alpha / 255;
+                    overlay.setTransform(this.baseMatrix.transform(transform).transform(lineOrNull.renderMatrix).scale(lineOrNull.scaleX, lineOrNull.scaleY));
+                    overlay.scale(1, -1);
+                    overlay.globalAlpha = lineOrNull.alpha / 255;
                 }
                 setColor(lineOrNull, fill)
             }
             const setColor = (lineOrNull: JudgeLine | null, fill: RGB) => {
                 if (!lineOrNull) {
-                    context.fillStyle = rgb(fill[0], fill[1], fill[2]);
+                    overlay.fillStyle = rgb(fill[0], fill[1], fill[2]);
                 } else {
                     const color = lineOrNull.color;
-                    context.fillStyle = rgb(fill[0] * color[0] / 255, fill[1] * color[1] / 255, fill[2] * color[2] / 255);
+                    overlay.fillStyle = rgb(fill[0] * color[0] / 255, fill[1] * color[1] / 255, fill[2] * color[2] / 255);
                 }
             }
             this.computeCombo(renderingBeats);
             const WHITE = [255, 255, 255] as RGB;
-            context.font = "32px phigros"
-            context.textAlign = "left";
+            overlay.font = "32px phigros"
+            overlay.textAlign = "left";
 
             const title = chart.name;
             const level = chart.level;
@@ -533,55 +679,55 @@ export class Player extends EventTarget {
 
             // name
             setTransformAlphaScaleColor(chart.nameAttach, WHITE, identity.translate(-hw + 43, hh - 34))
-            context.fillText(title, 0, 0);
+            overlay.fillText(title, 0, 0);
 
             // level
-            context.textAlign = "right";
+            overlay.textAlign = "right";
             setTransformAlphaScaleColor(chart.levelAttach, WHITE, identity.translate(hw - 43, hh - 34))
-            context.fillText(level, 0, 0);
+            overlay.fillText(level, 0, 0);
 
-            context.font = "40px phigros";
+            overlay.font = "40px phigros";
             // score
             const score = combo / chart.maxCombo * 100_0000;
             const text = score.toFixed(0).padStart(7, "0")
-            context.textBaseline = "top";
+            overlay.textBaseline = "top";
             setTransformAlphaScaleColor(chart.scoreAttach, WHITE, identity.translate(hw - 39, -hh + 30))
-            context.fillText(text, 0, 0);
+            overlay.fillText(text, 0, 0);
 
             // pause
             setTransformAlphaScaleColor(chart.pauseAttach, WHITE, identity.translate(-hw + 39, -hh + 30))
-            context.fillRect(0, 2, 8, 30)
-            context.fillRect(16, 2, 8, 30)
+            overlay.fillRect(0, 2, 8, 30)
+            overlay.fillRect(16, 2, 8, 30)
 
             // bar
             const progress = this.time / chart.duration;
             const barWidth = progress * STANDARD_WIDTH;
             setTransformAlphaScaleColor(chart.barAttach, [170, 170, 170], identity.translate(-hw, -hh));
-            context.fillRect(0, 0, barWidth, 8)
-            context.fillStyle = "#fff"
+            overlay.fillRect(0, 0, barWidth, 8)
+            overlay.fillStyle = "#fff"
 
-            context.fillRect(barWidth, 0, 2, 8)
+            overlay.fillRect(barWidth, 0, 2, 8)
 
             if (combo >= 3) { // combo(number)
-                context.textAlign = "center";
-                context.textBaseline = "alphabetic";
-                
-                context.font = "64px phigros"
-                setTransformAlphaScaleColor(chart.combonumberAttach, WHITE, identity.translate(0, -hh + 50))
-                context.fillText(combo.toString(), 0, 20);
+                overlay.textAlign = "center";
+                overlay.textBaseline = "alphabetic";
 
-                context.font = "24px phigros";
+                overlay.font = "64px phigros"
+                setTransformAlphaScaleColor(chart.combonumberAttach, WHITE, identity.translate(0, -hh + 50))
+                overlay.fillText(combo.toString(), 0, 20);
+
+                overlay.font = "24px phigros";
                 setTransformAlphaScaleColor(chart.comboAttach, WHITE, identity.translate(0, -hh + 95))
-                context.fillText(COMBO_TEXT, 0, 0);
+                overlay.fillText(COMBO_TEXT, 0, 0);
 
 
             }
-            context.restore();
+            overlay.restore();
         }
-        context.setTransform(this.baseMatrix);
+        overlay.setTransform(this.baseMatrix);
         // #default
-        context.font = "20px phigros";
-        context.fillStyle = "#ddd";
+        overlay.font = "20px phigros";
+        overlay.fillStyle = "#ddd";
         const now = performance.now();
         this.renderedFrames++;
         this.collectedFrameTime += now - start;
@@ -589,15 +735,34 @@ export class Player extends EventTarget {
         if (now - this.lastRenderingRealTime >= 1000) {
             const averageFrameTime = this.collectedFrameTime / this.renderedFrames;
             this.lastMeasuredFPSStr = (this.renderedFrames * 1000 / (now - this.lastRenderingRealTime)).toFixed(1) + ` (avg ${averageFrameTime.toFixed(2)}ms, max ${this.longestFrameTime.toFixed(2)}ms)`;
+            this.averageDrawCalls = this.drawCallsInWindow / this.renderedFrames;
             this.lastRenderingRealTime = now;
             this.renderedFrames = 0;
             this.collectedFrameTime = 0;
             this.longestFrameTime = 0;
+            this.drawCallsInWindow = 0;
         }
-        context.textAlign = "left";
-        context.fillText(this.lastMeasuredFPSStr + `(${this.renderedTextures} tex)`, 30, 25);
-        context.textAlign = "center";
-        context.fillText(this.time.toFixed(2) + "s " + renderingBeats.toFixed(2) + "b", STANDARD_WIDTH / 2, height)
+        overlay.textAlign = "left";
+        // 文本每帧重画，但内容一秒才变一次，这样不会每帧都重新光栅化一张文字纹理
+        const drawCallInfo = this.gpu ? `, ${this.averageDrawCalls.toFixed(1)} dc` : "";
+        overlay.fillText(this.lastMeasuredFPSStr + `(${this.renderedTextures} tex${drawCallInfo}, ${this.rendererName})`, 30, 25);
+        overlay.textAlign = "center";
+        overlay.fillText(this.time.toFixed(2) + "s " + renderingBeats.toFixed(2) + "b", STANDARD_WIDTH / 2, height)
+        // #enddefault
+
+        // #default
+        // 收集到的绘制在这里一次性排序、合批、实例化绘制，然后清空图层记录
+        const flushStart = performance.now();
+        const stats = this.gpu?.flush();
+        // draw call 数每帧都记（flush 本来就为了合批算过一遍，这里是白拿的）
+        this.lastDrawCalls = stats?.batches ?? 0;
+        this.drawCallsInWindow += this.lastDrawCalls;
+        if (Player.debugTiming) {
+            const end = performance.now();
+            console.log(`[player] 帧 ${(end - start).toFixed(1)}ms`
+                + `（记录 ${(flushStart - start).toFixed(1)}ms / 提交 ${(end - flushStart).toFixed(1)}ms，`
+                + `实例 ${stats?.instances ?? 0}，批次 ${stats?.batches ?? 0}）`);
+        }
         // #enddefault
 
         this.dispatchEvent(new Event("drawn"));
@@ -687,7 +852,7 @@ export class Player extends EventTarget {
         }
     }
     renderLineCurve(beats: number) {
-        const context = this.context;
+        const context = this.overlayContext;
         const timeCalculator = this.chart.timeCalculator;
         const curveFPS = this.curveFPS;
         const line = this.chart.judgeLines[this.greenLine];
@@ -730,12 +895,18 @@ export class Player extends EventTarget {
             const matrix = this.calculateLineMatrix(line, secs, true);
             context.setTransform(this.baseMatrix.transform(matrix));
             context.fillStyle = `hsl(${i / frames * 360}, 100%, 50%)`;
-            context.fill(CURVE_NODE_PATH);
+            context.beginPath();
+            context.moveTo(CURVE_NODE_SHAPE[0][0], CURVE_NODE_SHAPE[0][1]);
+            for (let p = 1; p < CURVE_NODE_SHAPE.length; p++) {
+                context.lineTo(CURVE_NODE_SHAPE[p][0], CURVE_NODE_SHAPE[p][1]);
+            }
+            context.closePath();
+            context.fill();
         }
         context.restore();
     }
     renderLineIDs() {
-        const context = this.context;
+        const context = this.overlayContext;
         const map = this.map;
         context.save();
         context.setTransform(this.baseMatrix);
@@ -1262,6 +1433,54 @@ export class Player extends EventTarget {
     }
     // #default
 
+    /**
+     * 把所有已知纹理事先传到 GPU。
+     *
+     * 不预热的话，播放第一帧会在录制阶段集中做几十次 texImage2D
+     * （canvas 源还要在 CPU 上做一次预乘），很容易出现一次几百毫秒到几秒的卡顿，
+     * 表现就是「刚开始播放卡住不动」。
+     */
+    warmup() {
+        const gpu = this.gpu;
+        if (!gpu) return;
+
+        const upload = (source: TexImageSource | null | undefined) => {
+            if (!source) return;
+            try {
+                gpu.getTexture(source);
+            } catch (error) {
+                console.warn("[Player] 纹理预热失败，将在用到时再上传:", error);
+            }
+        };
+
+        for (const texture of this.textureMapping.values()) upload(texture);
+        upload(Images.ANCHOR);
+        upload(Images.BELOW);
+        upload(this.background);
+        upload(this.blurredBackground);
+        const respack = this.respack;
+        for (const source of [
+            respack.TAP, respack.DRAG, respack.FLICK,
+            respack.TAP_HL, respack.FLICK_HL, respack.DRAG_HL,
+            respack.HOLD_BODY, respack.HOLD_HEAD, respack.HOLD_TAIL,
+            respack.HOLD_BODY_HL, respack.HOLD_HEAD_HL, respack.HOLD_TAIL_HL,
+            respack.HIT_FX,
+        ]) {
+            upload(source);
+        }
+
+        // 再跑一次空提交：让着色器首次使用、实例缓冲分配、交换链初始化的开销也发生在这里。
+        // 播放中重新 receive 的话就不做了，免得闪一帧空白。
+        if (!this.playing) {
+            const base = this.context;
+            base.save();
+            base.globalAlpha = 0;      // 完全透明，屏幕上什么都看不到
+            base.fillRect(0, 0, 1, 1);
+            base.restore();
+            gpu.flush();
+        }
+    }
+
     // #default
     private update() {
         if (!this.playing) {
@@ -1300,6 +1519,10 @@ export class Player extends EventTarget {
             const bmp = await textureFetcher(texture);
             this.textureMapping.set(texture, bmp);    
         }
+        // #default
+        // 纹理已经全部解码好，趁现在（加载阶段）就传到 GPU，别留到播放第一帧
+        this.warmup();
+        // #enddefault
 
         const videos = chart.scanAllVideos();
         for (const video of videos) {
