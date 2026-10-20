@@ -122,7 +122,7 @@ fileInput.addEventListener("change", async (e) => {
     const player = await Player.create(canvas, audioProcessor, audio, background, respack, { renderer });
     console.log(`[demo] 渲染后端: ${player.rendererName}`);
     player.renderingOffset = -0.40;
-    player.baseOffset = 0.20;
+    player.baseOffset = -0.017;
     player.showsRenderingBaseline = false;
     player.hitEffectNoFollows = true;
     player.receive(
