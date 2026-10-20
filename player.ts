@@ -15,6 +15,7 @@ import {
     TC,
     NNNodeLike,
     type TimeT,
+    type EffectStartNode,
     VideoScale
 } from "kipphi";
 /// #default
@@ -37,7 +38,7 @@ import { AudioProcessor } from "./audioProcessor";
 }
 */
 // #default
-import { AnyGPUContext2D, type LayerContext2D } from "./context";
+import { AnyGPUContext2D, type EffectRequest, type EffectShader, type EffectUniforms, type LayerContext2D } from "./context";
 // #enddefault
 
 /**
@@ -128,11 +129,269 @@ const FLICK_LAYER = 6;
 const HIT_EFFECT_LAYER = 7;
 const TEXTURE_BOUNDS_LAYER = 8;
 const NOTE_TYPE_LAYER_MAP = [null, TAP_LAYER, HOLD_LAYER, FLICK_LAYER, DRAG_LAYER]
-/** GPU 模式：图层下标直接当 z 用，0 是底图/判定线，3~8 是音符层，9 是覆盖层 */
+/**
+ * GPU 模式：图层下标直接当 z 用。
+ * 0 是底图/判定线，3~8 是音符层，9 是谱面自己的 UI（combo/进度条/曲名/线号/曲线），
+ * 10 是只放帧率和时间的覆盖层 —— 它永远不进特效区间。
+ */
 const GPU_Z_BASE = 0;
-const GPU_Z_OVERLAY = 9;
-const GPU_Z_MAX = 10;
-const NO_LAYER_INDICES = [HOLD_LAYER, DRAG_LAYER, TAP_LAYER, FLICK_LAYER, HIT_EFFECT_LAYER, TEXTURE_BOUNDS_LAYER];
+const CHART_UI_LAYER = 9;
+const GPU_Z_UI = CHART_UI_LAYER;
+const GPU_Z_OVERLAY = 10;
+const GPU_Z_MAX = 11;
+const NO_LAYER_INDICES = [HOLD_LAYER, DRAG_LAYER, TAP_LAYER, FLICK_LAYER, HIT_EFFECT_LAYER, TEXTURE_BOUNDS_LAYER, CHART_UI_LAYER];
+
+// #default
+
+/**
+ * 内置特效着色器（Phira 的 `effect.shader` 名字）。
+ *
+ * 注意：`chromatic` 的参数名（power / sampleCount）与 Phira 文档一致；
+ * `blur` 的参数名是本项目自定的（Phira 文档没给内置清单），
+ * 谱面里实际用到的内置名以 Phira 为准，加到这里就行。
+ *
+ * 自定义着色器（`shader` 以 `/` 开头，指向谱面包内文件）走
+ * {@linkcode Player.receive} 的 `shaderFetcher`，只有 GLSL（WebGL 1）能用。
+ */
+export const BUILTIN_EFFECT_SHADERS: EffectShader[] = [
+    {
+        // 色差：R / B 通道沿「像素 → 屏幕中心」方向反向偏移
+        name: "chromatic",
+        glsl: `
+        uniform float power;        // %0.05%
+        uniform float sampleCount;  // %5% 谱面会传，这里只用于兼容
+
+        void main() {
+            vec2 dir = uv - vec2(0.5);
+            float r = texture2D(screenTexture, uv + dir * power).r;
+            float g = texture2D(screenTexture, uv).g;
+            float b = texture2D(screenTexture, uv - dir * power).b;
+            float a = texture2D(screenTexture, uv).a;
+            gl_FragColor = vec4(r, g, b, a);
+        }
+        `,
+        wgsl: `
+        let dir = in.uv - vec2f(0.5, 0.5);
+        let r = textureSample(screenTexture, samp, in.uv + dir * power).r;
+        let g = textureSample(screenTexture, samp, in.uv).g;
+        let b = textureSample(screenTexture, samp, in.uv - dir * power).b;
+        let a = textureSample(screenTexture, samp, in.uv).a;
+        return vec4f(r, g, b, a);
+        `,
+    },
+    {
+        // 高斯模糊（水平），与 #blur-y 串成两趟
+        name: "#blur-x",
+        glsl: `
+        uniform float radius; // %0.01%
+
+        void main() {
+            vec2 texel = vec2(1.0) / screenSize;
+            vec4 sum = vec4(0.0);
+            float total = 0.0;
+            for (int i = -4; i <= 4; i++) {
+                float w = exp(-float(i * i) / 8.0);
+                sum += texture2D(screenTexture, uv + vec2(float(i), 0.0) * radius * texel) * w;
+                total += w;
+            }
+            gl_FragColor = sum / total;
+        }
+        `,
+        wgsl: `
+        let texel = vec2f(1.0, 1.0) / screenSize;
+        var sum = vec4f(0.0, 0.0, 0.0, 0.0);
+        var total = 0.0;
+        for (var i = -4; i <= 4; i++) {
+            let fi = f32(i);
+            let w = exp(-fi * fi / 8.0);
+            sum += textureSample(screenTexture, samp, in.uv + vec2f(fi, 0.0) * radius * texel) * w;
+            total += w;
+        }
+        return sum / total;
+        `,
+    },
+    {
+        // 高斯模糊（垂直）
+        name: "#blur-y",
+        glsl: `
+        uniform float radius; // %0.01%
+
+        void main() {
+            vec2 texel = vec2(1.0) / screenSize;
+            vec4 sum = vec4(0.0);
+            float total = 0.0;
+            for (int i = -4; i <= 4; i++) {
+                float w = exp(-float(i * i) / 8.0);
+                sum += texture2D(screenTexture, uv + vec2(0.0, float(i)) * radius * texel) * w;
+                total += w;
+            }
+            gl_FragColor = sum / total;
+        }
+        `,
+        wgsl: `
+        let texel = vec2f(1.0, 1.0) / screenSize;
+        var sum = vec4f(0.0, 0.0, 0.0, 0.0);
+        var total = 0.0;
+        for (var i = -4; i <= 4; i++) {
+            let fi = f32(i);
+            let w = exp(-fi * fi / 8.0);
+            sum += textureSample(screenTexture, samp, in.uv + vec2f(0.0, fi) * radius * texel) * w;
+            total += w;
+        }
+        return sum / total;
+        `,
+    },
+    {
+        // 像素化：把画面量化成 size 像素一块（Phira: pixel / size 10.0）
+        name: "pixel",
+        glsl: `
+        uniform float size; // %10.0%
+
+        void main() {
+            vec2 blocks = screenSize / max(size, 1.0);
+            gl_FragColor = texture2D(screenTexture, (floor(uv * blocks) + 0.5) / blocks);
+        }
+        `,
+        wgsl: `
+        let blocks = screenSize / max(size, 1.0);
+        return textureSample(screenTexture, samp, (floor(in.uv * blocks) + vec2f(0.5, 0.5)) / blocks);
+        `,
+    },
+    {
+        // 灰度：factor 0 = 原色，1 = 完全灰度（Phira: grayscale / factor 1.0）
+        name: "grayscale",
+        glsl: `
+        uniform float factor; // %1.0%
+
+        void main() {
+            vec4 c = texture2D(screenTexture, uv);
+            float gray = dot(c.rgb, vec3(0.299, 0.587, 0.114));
+            gl_FragColor = vec4(mix(c.rgb, vec3(gray), factor), c.a);
+        }
+        `,
+        wgsl: `
+        let c = textureSample(screenTexture, samp, in.uv);
+        let gray = dot(c.rgb, vec3f(0.299, 0.587, 0.114));
+        return vec4f(mix(c.rgb, vec3f(gray), factor), c.a);
+        `,
+    },
+    {
+        // 暗角：边缘向 color 渐变。extend = 从边缘算起的深度，radius 越小影响范围越大
+        // （Phira: vignette / color 黑、extend 0.25、radius 15.0）
+        name: "vignette",
+        glsl: `
+        uniform vec4 color;   // %0 0 0 1%
+        uniform float extend; // %0.25%
+        uniform float radius; // %15.0%
+
+        void main() {
+            vec4 c = texture2D(screenTexture, uv);
+            vec2 d = (uv - 0.5) * 2.0;
+            float dist = length(d);
+            float inner = 1.0 - clamp(extend, 0.0, 1.0);
+            float t = smoothstep(inner, 1.0 + 1.0 / max(radius, 0.001), dist);
+            // 预乘 alpha：目标色也要乘上原来的 alpha
+            gl_FragColor = vec4(mix(c.rgb, color.rgb * c.a, t), c.a);
+        }
+        `,
+        wgsl: `
+        let c = textureSample(screenTexture, samp, in.uv);
+        let d = (in.uv - vec2f(0.5, 0.5)) * 2.0;
+        let dist = length(d);
+        let inner = 1.0 - clamp(extend, 0.0, 1.0);
+        let t = smoothstep(inner, 1.0 + 1.0 / max(radius, 0.001), dist);
+        return vec4f(mix(c.rgb, color.rgb * c.a, t), c.a);
+        `,
+    },
+    {
+        // 圆形模糊：越靠近屏幕中心越糊，糊出来的那团会显得更亮
+        // （Phira: circleBlur / size 10.0，单位像素）
+        name: "circleBlur",
+        glsl: `
+        uniform float size; // %10.0%
+
+        void main() {
+            vec2 dir = uv - 0.5;
+            float dist = length(dir * screenSize);
+            float strength = clamp(size / max(dist, 1.0), 0.0, 1.0) * 0.02;
+            vec4 sum = vec4(0.0);
+            for (int i = 0; i < 8; i++) {
+                sum += texture2D(screenTexture, uv + dir * (float(i) / 7.0 - 0.5) * strength);
+            }
+            gl_FragColor = sum / 8.0;
+        }
+        `,
+        wgsl: `
+        let dir = in.uv - vec2f(0.5, 0.5);
+        let dist = length(dir * screenSize);
+        let strength = clamp(size / max(dist, 1.0), 0.0, 1.0) * 0.02;
+        var sum = vec4f(0.0, 0.0, 0.0, 0.0);
+        for (var i = 0; i < 8; i++) {
+            sum += textureSample(screenTexture, samp, in.uv + dir * (f32(i) / 7.0 - 0.5) * strength);
+        }
+        return sum / 8.0;
+        `,
+    },
+    {
+        // 冲击波：以 (centerX, centerY) 为圆心向外推一圈，progress 0 → 1 播放一次
+        // （Phira: shockwave / progress 0.2、centerX/Y 0.5、width 0.1、distortion 0.8、expand 10.0）
+        name: "shockwave",
+        glsl: `
+        uniform float progress;   // %0.2%
+        uniform float centerX;    // %0.5%
+        uniform float centerY;    // %0.5%
+        uniform float width;      // %0.1%
+        uniform float distortion; // %0.8%
+        uniform float expand;     // %10.0%
+
+        void main() {
+            vec2 diff = uv - vec2(centerX, centerY);
+            float dist = length(diff);
+            float radius = progress * max(expand, 0.001) * 0.1;
+            // smoothstep 要求 edge0 < edge1，这里反过来写再取补
+            float band = 1.0 - smoothstep(0.0, max(width, 0.001), abs(dist - radius));
+            vec2 dir = dist > 0.0001 ? diff / dist : vec2(0.0);
+            float amount = band * distortion * 0.5 * (1.0 - progress) / max(expand, 0.001);
+            gl_FragColor = texture2D(screenTexture, uv - dir * amount);
+        }
+        `,
+        wgsl: `
+        let diff = in.uv - vec2f(centerX, centerY);
+        let dist = length(diff);
+        let radius = progress * max(expand, 0.001) * 0.1;
+        let band = 1.0 - smoothstep(0.0, max(width, 0.001), abs(dist - radius));
+        let dir = select(vec2f(0.0, 0.0), diff / max(dist, 0.0001), dist > 0.0001);
+        let amount = band * distortion * 0.5 * (1.0 - progress) / max(expand, 0.001);
+        return textureSample(screenTexture, samp, in.uv - dir * amount);
+        `,
+    },
+];
+
+/**
+ * 特效在 `[start, end]` 内的进度（0 → 1）。
+ *
+ * Phira 的 `shockwave` 等效果靠 `progress` 推进动画：谱面通常自己写一条
+ * 从 0 到 1 的 `progress` 事件；没写的时候（比如只写了个固定 duration 的
+ * shockwave）就用这里按特效区间算出来的值兜底。
+ */
+function effectProgress(effect: EffectStartNode, beats: number): number {
+    const end = effect.getEndTime();
+    if (!end) return 0;
+    const startBeats = TC.toBeats(effect.time);
+    const endBeats = TC.toBeats(end);
+    if (!(endBeats > startBeats)) return 0;
+    return Math.min(1, Math.max(0, (beats - startBeats) / (endBeats - startBeats)));
+}
+
+/** `blur` 展开成水平 + 垂直两趟（我们的特效链天然支持） */
+const EFFECT_CHAINS: Record<string, (uniforms: EffectUniforms) => EffectRequest[]> = {
+    // radius 缺省值写在这两个着色器自己的 `// %0.01%` 里
+    blur: (uniforms) => [
+        { shader: "#blur-x", uniforms },
+        { shader: "#blur-y", uniforms },
+    ],
+};
+// #enddefault
 
 /** 渲染后端优先级 */
 export type RendererPreference = "auto" | "webgpu" | "webgl1" | "canvas2d";
@@ -155,7 +414,15 @@ export interface PlayerOptions {
 export class Player extends EventTarget {
     canvas: HTMLCanvasElement;
     context: PlayContext2D;
-    /** 覆盖层（进度条、combo、FPS 等）；GPU 模式下是 z 最高的图层 */
+    /**
+     * 谱面自己的 UI 层（combo、进度条、曲名、线号、曲线）。
+     * 它属于谱面的一部分，会被非 global 的特效处理到。
+     */
+    chartUIContext: PlayContext2D;
+    /**
+     * 覆盖层，**只放帧率和时间**。
+     * GPU 模式下 z 高于所有谱面图层，因此永远不会被特效区间覆盖。
+     */
     overlayContext: PlayContext2D;
     /**
      * GPU 上下文（仅浏览器）。
@@ -198,6 +465,8 @@ export class Player extends EventTarget {
     renderedTextures: number = 0;
     /** 上一帧的 draw call 数（GPU 模式；Canvas 2D 恒为 0） */
     lastDrawCalls: number = 0;
+    /** 上一帧跑过的特效着色器趟数（blur 这种两趟的算 2） */
+    lastEffectCount: number = 0;
     /** 最近一个统计窗口内平均每帧的 draw call 数，显示用 */
     averageDrawCalls: number = 0;
     private drawCallsInWindow: number = 0;
@@ -235,7 +504,7 @@ export class Player extends EventTarget {
 
     // 不使用无法寻路SVG滤镜的OffscreenCanvas
     // GPU 模式下第一项为 null（不需要中间画布），第二项是 LayerContext2D
-    layers: [HTMLCanvasElement | null, PlayContext2D][] = new Array(9);
+    layers: [HTMLCanvasElement | null, PlayContext2D][] = new Array(10);
     
 
     public height: number;
@@ -271,6 +540,8 @@ export class Player extends EventTarget {
             for (const index of NO_LAYER_INDICES) {
                 this.layers[index] = [null, this.gpu.createLayer(index)];
             }
+            this.chartUIContext = this.layers[CHART_UI_LAYER]![1];
+            this.gpu.addShaders(BUILTIN_EFFECT_SHADERS);
         } else {
             this.context = canvas.getContext("2d");
             this.overlayContext = this.context;
@@ -283,6 +554,7 @@ export class Player extends EventTarget {
             for (const index of NO_LAYER_INDICES) {
                 this.layers[index] = newLayer();
             }
+            this.chartUIContext = this.layers[CHART_UI_LAYER]![1];
         }
         this.background = background;
 
@@ -645,32 +917,32 @@ export class Player extends EventTarget {
             this.renderLineIDs();
         }
 
-        // 覆盖层：2D 模式下就是主上下文，GPU 模式下是 z 最高的图层
-        const overlay = this.overlayContext;
+        // 谱面自己的 UI（combo/进度条/曲名…）：归在谱面图层里，会被非 global 的特效处理到
+        const chartUI = this.chartUIContext;
         if (this.showsInfo) {
-            overlay.save()
+            chartUI.save()
             const setTransformAlphaScaleColor = (lineOrNull: JudgeLine | null, fill: RGB, transform: Matrix33 = identity) => {
                 if (!lineOrNull) {
-                    overlay.setTransform(this.baseMatrix.transform(transform).translate(STANDARD_WIDTH / 2, hh));
+                    chartUI.setTransform(this.baseMatrix.transform(transform).translate(STANDARD_WIDTH / 2, hh));
                 } else {
-                    overlay.setTransform(this.baseMatrix.transform(transform).transform(lineOrNull.renderMatrix).scale(lineOrNull.scaleX, lineOrNull.scaleY));
-                    overlay.scale(1, -1);
-                    overlay.globalAlpha = lineOrNull.alpha / 255;
+                    chartUI.setTransform(this.baseMatrix.transform(transform).transform(lineOrNull.renderMatrix).scale(lineOrNull.scaleX, lineOrNull.scaleY));
+                    chartUI.scale(1, -1);
+                    chartUI.globalAlpha = lineOrNull.alpha / 255;
                 }
                 setColor(lineOrNull, fill)
             }
             const setColor = (lineOrNull: JudgeLine | null, fill: RGB) => {
                 if (!lineOrNull) {
-                    overlay.fillStyle = rgb(fill[0], fill[1], fill[2]);
+                    chartUI.fillStyle = rgb(fill[0], fill[1], fill[2]);
                 } else {
                     const color = lineOrNull.color;
-                    overlay.fillStyle = rgb(fill[0] * color[0] / 255, fill[1] * color[1] / 255, fill[2] * color[2] / 255);
+                    chartUI.fillStyle = rgb(fill[0] * color[0] / 255, fill[1] * color[1] / 255, fill[2] * color[2] / 255);
                 }
             }
             this.computeCombo(renderingBeats);
             const WHITE = [255, 255, 255] as RGB;
-            overlay.font = "32px phigros"
-            overlay.textAlign = "left";
+            chartUI.font = "32px phigros"
+            chartUI.textAlign = "left";
 
             const title = chart.name;
             const level = chart.level;
@@ -679,55 +951,57 @@ export class Player extends EventTarget {
 
             // name
             setTransformAlphaScaleColor(chart.nameAttach, WHITE, identity.translate(-hw + 43, hh - 34))
-            overlay.fillText(title, 0, 0);
+            chartUI.fillText(title, 0, 0);
 
             // level
-            overlay.textAlign = "right";
+            chartUI.textAlign = "right";
             setTransformAlphaScaleColor(chart.levelAttach, WHITE, identity.translate(hw - 43, hh - 34))
-            overlay.fillText(level, 0, 0);
+            chartUI.fillText(level, 0, 0);
 
-            overlay.font = "40px phigros";
+            chartUI.font = "40px phigros";
             // score
             const score = combo / chart.maxCombo * 100_0000;
             const text = score.toFixed(0).padStart(7, "0")
-            overlay.textBaseline = "top";
+            chartUI.textBaseline = "top";
             setTransformAlphaScaleColor(chart.scoreAttach, WHITE, identity.translate(hw - 39, -hh + 30))
-            overlay.fillText(text, 0, 0);
+            chartUI.fillText(text, 0, 0);
 
             // pause
             setTransformAlphaScaleColor(chart.pauseAttach, WHITE, identity.translate(-hw + 39, -hh + 30))
-            overlay.fillRect(0, 2, 8, 30)
-            overlay.fillRect(16, 2, 8, 30)
+            chartUI.fillRect(0, 2, 8, 30)
+            chartUI.fillRect(16, 2, 8, 30)
 
             // bar
             const progress = this.time / chart.duration;
             const barWidth = progress * STANDARD_WIDTH;
             setTransformAlphaScaleColor(chart.barAttach, [170, 170, 170], identity.translate(-hw, -hh));
-            overlay.fillRect(0, 0, barWidth, 8)
-            overlay.fillStyle = "#fff"
+            chartUI.fillRect(0, 0, barWidth, 8)
+            chartUI.fillStyle = "#fff"
 
-            overlay.fillRect(barWidth, 0, 2, 8)
+            chartUI.fillRect(barWidth, 0, 2, 8)
 
             if (combo >= 3) { // combo(number)
-                overlay.textAlign = "center";
-                overlay.textBaseline = "alphabetic";
+                chartUI.textAlign = "center";
+                chartUI.textBaseline = "alphabetic";
 
-                overlay.font = "64px phigros"
+                chartUI.font = "64px phigros"
                 setTransformAlphaScaleColor(chart.combonumberAttach, WHITE, identity.translate(0, -hh + 50))
-                overlay.fillText(combo.toString(), 0, 20);
+                chartUI.fillText(combo.toString(), 0, 20);
 
-                overlay.font = "24px phigros";
+                chartUI.font = "24px phigros";
                 setTransformAlphaScaleColor(chart.comboAttach, WHITE, identity.translate(0, -hh + 95))
-                overlay.fillText(COMBO_TEXT, 0, 0);
+                chartUI.fillText(COMBO_TEXT, 0, 0);
 
 
             }
-            overlay.restore();
+            chartUI.restore();
         }
-        overlay.setTransform(this.baseMatrix);
+        // 真正的覆盖层：只放帧率和时间，z 高于所有谱面图层，永远不受特效影响
+        const hud = this.overlayContext;
+        hud.setTransform(this.baseMatrix);
         // #default
-        overlay.font = "20px phigros";
-        overlay.fillStyle = "#ddd";
+        hud.font = "20px phigros";
+        hud.fillStyle = "#ddd";
         const now = performance.now();
         this.renderedFrames++;
         this.collectedFrameTime += now - start;
@@ -742,20 +1016,25 @@ export class Player extends EventTarget {
             this.longestFrameTime = 0;
             this.drawCallsInWindow = 0;
         }
-        overlay.textAlign = "left";
+        hud.textAlign = "left";
         // 文本每帧重画，但内容一秒才变一次，这样不会每帧都重新光栅化一张文字纹理
         const drawCallInfo = this.gpu ? `, ${this.averageDrawCalls.toFixed(1)} dc` : "";
-        overlay.fillText(this.lastMeasuredFPSStr + `(${this.renderedTextures} tex${drawCallInfo}, ${this.rendererName})`, 30, 25);
-        overlay.textAlign = "center";
-        overlay.fillText(this.time.toFixed(2) + "s " + renderingBeats.toFixed(2) + "b", STANDARD_WIDTH / 2, height)
+        // 着色器趟数一般不会剧烈变化，这里直接用当帧的值，不做窗口平均
+        const effectInfo = this.gpu ? `, ${this.lastEffectCount} shader` : "";
+        hud.fillText(this.lastMeasuredFPSStr + `(${this.renderedTextures} tex${drawCallInfo}${effectInfo}, ${this.rendererName})`, 30, 25);
+        hud.textAlign = "center";
+        hud.fillText(this.time.toFixed(2) + "s " + renderingBeats.toFixed(2) + "b", STANDARD_WIDTH / 2, height)
         // #enddefault
 
         // #default
         // 收集到的绘制在这里一次性排序、合批、实例化绘制，然后清空图层记录
+        // 特效要在 flush 前设置好：区间内的图层会先进离屏纹理再过着色器
+        this.applyEffects(renderingBeats);
         const flushStart = performance.now();
         const stats = this.gpu?.flush();
         // draw call 数每帧都记（flush 本来就为了合批算过一遍，这里是白拿的）
         this.lastDrawCalls = stats?.batches ?? 0;
+        this.lastEffectCount = stats?.effects ?? 0;
         this.drawCallsInWindow += this.lastDrawCalls;
         if (Player.debugTiming) {
             const end = performance.now();
@@ -852,7 +1131,8 @@ export class Player extends EventTarget {
         }
     }
     renderLineCurve(beats: number) {
-        const context = this.overlayContext;
+        // 属于谱面 UI，跟着谱面一起被特效处理
+        const context = this.chartUIContext;
         const timeCalculator = this.chart.timeCalculator;
         const curveFPS = this.curveFPS;
         const line = this.chart.judgeLines[this.greenLine];
@@ -906,7 +1186,7 @@ export class Player extends EventTarget {
         context.restore();
     }
     renderLineIDs() {
-        const context = this.overlayContext;
+        const context = this.chartUIContext;
         const map = this.map;
         context.save();
         context.setTransform(this.baseMatrix);
@@ -1482,6 +1762,67 @@ export class Player extends EventTarget {
     }
 
     // #default
+
+    /** 已经提醒过「未注册」的着色器名 */
+    private readonly warnedShaders = new Set<string>();
+
+    /** 注册一个特效着色器（谱面带的自定义着色器，或应用自备的） */
+    addEffectShader(shader: EffectShader) {
+        this.gpu?.addShader(shader);
+    }
+
+    /**
+     * 把谱面的 Phira 特效应用到这个帧上。
+     *
+     * - 非 global 的特效只作用于谱面图层 `[0, GPU_Z_UI)`，
+     *   谱面自己的 UI（combo、进度条、曲名…）不受影响；
+     * - global 的特效作用于 `[0, GPU_Z_OVERLAY)`，即谱面 + 谱面 UI，
+     *   但**永远不含**只放帧率/时间的覆盖层。
+     *
+     * 每帧调用一次即可（内部会先清掉上一帧的设置）。
+     */
+    applyEffects(beats: number) {
+        const gpu = this.gpu;
+        if (!gpu) return;
+
+        gpu.clearEffects();
+        gpu.time = this.renderingTime;
+
+        const effects = this.chart.getActiveEffects(beats);
+        if (effects.length === 0) return;
+
+        const chartChain: EffectRequest[] = [];
+        const globalChain: EffectRequest[] = [];
+        const missing: string[] = [];
+
+        for (const effect of effects) {
+            // 谱面自己写了 progress 就以谱面为准（spread 在后面覆盖），没写才用按区间算的
+            const uniforms = { progress: effectProgress(effect, beats), ...effect.evalVars(beats) };
+            const chain = EFFECT_CHAINS[effect.value]?.(uniforms) ?? [{ shader: effect.value, uniforms }];
+            for (const request of chain) {
+                if (!gpu.getShader(request.shader) && !missing.includes(request.shader)) missing.push(request.shader);
+            }
+            (effect.global ? globalChain : chartChain).push(...chain);
+        }
+
+        for (const name of missing) {
+            // 每个没注册的着色器只提醒一次，别每帧刷屏
+            if (this.warnedShaders.has(name)) continue;
+            this.warnedShaders.add(name);
+            console.warn(`[Player] 特效着色器未注册，已跳过: ${name}`
+                + "（自定义着色器请通过 receive() 的 shaderFetcher 或 addEffectShader() 注册）");
+        }
+
+        if (globalChain.length > 0) {
+            // global 覆盖谱面 + 谱面 UI（到 GPU_Z_OVERLAY 为止），但不碰帧率/时间层；
+            // 非 global 的排在它前面，相当于「先把谱面处理一遍，再连 UI 一起处理一遍」
+            gpu.setEffect(GPU_Z_BASE, GPU_Z_OVERLAY, [...chartChain, ...globalChain]);
+        } else if (chartChain.length > 0) {
+            gpu.setEffect(GPU_Z_BASE, GPU_Z_UI, chartChain);
+        }
+    }
+
+    // #default
     private update() {
         if (!this.playing) {
             return;
@@ -1507,7 +1848,18 @@ export class Player extends EventTarget {
     }
     // #enddefault
 
-    async receive(chart: Chart, textureFetcher: (name: string) => Promise<ImageBitmap>, videoFetcher: (name: string) => Promise<VideoFrameSource>) {
+    async receive(
+        chart: Chart,
+        textureFetcher: (name: string) => Promise<ImageBitmap>,
+        // #default
+        videoFetcher?: (name: string) => Promise<VideoFrameSource>,
+        /** 谱面里引用的自定义特效着色器（`shader` 以 `/` 开头时按路径索取） */
+        shaderFetcher?: (path: string) => Promise<EffectShader | null>,
+        // #enddefault
+        /* #node {
+        videoFetcher: (name: string) => Promise<VideoFrameSource>
+        } */
+    ) {
         this.chart = chart;
 
         this.lastUnplayedNNNode = chart.nnnList.head.next;
@@ -1517,19 +1869,71 @@ export class Player extends EventTarget {
         textures.delete("line.png");
         for (const texture of textures) {
             const bmp = await textureFetcher(texture);
-            this.textureMapping.set(texture, bmp);    
+            this.textureMapping.set(texture, bmp);
         }
         // #default
         // 纹理已经全部解码好，趁现在（加载阶段）就传到 GPU，别留到播放第一帧
         this.warmup();
         // #enddefault
 
-        const videos = chart.scanAllVideos();
-        for (const video of videos) {
-            const vid = await videoFetcher(video)
-            this.videoMapping.set(video, vid);    
+        // #default
+        if (this.gpu) {
+            // 只有以 / 开头的是谱面包里的自定义着色器，内置的由渲染端提供
+            const shaders = chart.scanAllShaders();
+            if (shaders.size > 0) {
+                if (shaderFetcher) {
+                    await this.loadEffectShaders(shaders, shaderFetcher);
+                } else {
+                    console.warn(`[Player] 谱面引用了 ${shaders.size} 个自定义特效着色器，`
+                        + "但没有提供 shaderFetcher，这些特效会被跳过");
+                }
+            }
+        }
+        // #enddefault
+
+        if (videoFetcher) {
+            const videos = chart.scanAllVideos();
+            for (const video of videos) {
+                const vid = await videoFetcher(video);
+                this.videoMapping.set(video, vid);
+            }
         }
     }
+
+    // #default
+    /**
+     * 把谱面引用到的自定义特效着色器（`shader` 以 `/` 开头）加载并注册。
+     *
+     * 自定义着色器目前只有 GLSL（WebGL 1）一路；WebGPU 上会被跳过并 warn。
+     */
+    private async loadEffectShaders(paths: Iterable<string>, shaderFetcher: (path: string) => Promise<EffectShader | null>) {
+        const gpu = this.gpu;
+        if (!gpu) return;
+
+        for (const path of paths) {
+            if (gpu.getShader(path)) continue;
+            let shader: EffectShader | null = null;
+            try {
+                shader = await shaderFetcher(path);
+            } catch (error) {
+                console.warn(`[Player] 特效着色器加载失败: ${path}`, error);
+                continue;
+            }
+            if (!shader) {
+                console.warn(`[Player] 特效着色器加载失败: ${path}`);
+                continue;
+            }
+            // 注册名必须和谱面里的 effect.shader 完全一致，否则查不到
+            if (!shader.name) shader.name = path;
+            if (gpu.kind === "webgpu" && !shader.wgsl) {
+                console.warn(`[Player] ${path} 只有 GLSL 版本，WebGPU 后端下会被跳过`);
+                continue;
+            }
+            gpu.addShader(shader);
+        }
+    }
+    // #enddefault
+
     destroy() {
         this.tinter.destroy();
     }

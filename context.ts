@@ -64,6 +64,52 @@ export interface FlushStats {
     instances: number;
     /** 拆出来的 draw call 数 */
     batches: number;
+    /** 这一帧真正跑了的特效着色器趟数（blur 这种两趟的算 2；贴回画布不算） */
+    effects: number;
+}
+
+/* ------------------------------------------------------------------ *
+ * 特效（后处理着色器）
+ *
+ * 特效是「一整帧里某个 z 区间的内容画到离屏纹理后，再过一遍全屏着色器」。
+ * 区间由调用方决定，因此「只影响谱面不影响 UI」这种事情只要让区间不含
+ * UI 所在图层就行了（参考 Phira 的 effect.global）。
+ * ------------------------------------------------------------------ */
+
+/** uniform 的取值：标量、二元组或四元组 */
+export type EffectUniformValue = number | readonly [number, number] | readonly [number, number, number, number];
+export type EffectUniforms = Record<string, EffectUniformValue>;
+
+/** 一次特效请求：用哪个着色器、uniform 当前取什么值 */
+export interface EffectRequest {
+    shader: string;
+    uniforms?: EffectUniforms;
+}
+
+/** 注册到上下文里的着色器 */
+export interface EffectShader {
+    /** 唯一名字，Phira 里就是 effect.shader（内置名或 `/包内路径`） */
+    name: string;
+    /**
+     * uniform 布局：名字 -> 分量数（1 = float，2 = vec2，4 = vec4）。
+     *
+     * **一般不用写**：会从源码里自动解析——
+     * GLSL 看 `uniform float x; // %默认值%` 声明，
+     * WGSL 看 `// @uniform float x = 0.5` 注释指令，
+     * 两者都有时合并（同名以 WGSL 为准）。显式给出时则覆盖解析结果。
+     */
+    layout?: Record<string, 1 | 2 | 4>;
+    /** WebGL 1 用的片元着色器（GLSL ES 1.00），可用内置的 uv / screenTexture / screenSize / time */
+    glsl?: string;
+    /** WebGPU 用的片元主体（WGSL，返回值 vec4f），变量名与 GLSL 版一致 */
+    wgsl?: string;
+}
+
+/** 一个 z 区间上依次应用的特效链。区间是**左闭右开**的 `[from, to)` */
+export interface EffectRange {
+    from: number;
+    to: number;
+    chain: EffectRequest[];
 }
 
 export interface AnyGPUContext2DOptions {
@@ -399,13 +445,34 @@ function buildStroke(
 /** 后端能接受的上传源：DOM 图像源，或已经是原始像素的白纹理 */
 type TextureSource = TexImageSource | Uint8Array;
 
+/** 后端编译好的特效着色器 */
+interface CompiledEffect {
+    /** uniform 名字 -> 分量数，顺序即打包顺序 */
+    layout: Record<string, 1 | 2 | 4>;
+}
+
 interface RenderBackend {
     readonly kind: BackendKind;
     beginFrame(width: number, height: number, zRange: [number, number], clear: RGBA | null): void;
     createTexture(source: TextureSource, width: number, height: number): unknown;
     destroyTexture(handle: unknown): void;
     uploadInstances(data: Float32Array, count: number): void;
-    drawInstances(texture: unknown, blend: number, first: number, count: number): void;
+    /** 把 [first, first+count) 画进 target；target 为 null 表示画布 */
+    drawInstances(texture: unknown, blend: number, first: number, count: number, target?: unknown): void;
+    /** 跑一次全屏后处理：把 source 过一遍特效着色器，写进 target */
+    runEffect(compiled: unknown, source: unknown, target: unknown, uniforms: EffectUniforms, width: number, height: number, time: number): void;
+    /** 把离屏纹理原样贴到 target（null = 画布，预乘 alpha 直接拷贝） */
+    blit(source: unknown, target: unknown): void;
+    /** 空帧也要清一次画布 */
+    clearFrame(): void;
+    /** 把某块离屏纹理清成全透明 */
+    clearRenderTarget(handle: unknown): void;
+    /** 创建一块可渲染的离屏纹理（后处理用） */
+    createRenderTarget(width: number, height: number): unknown;
+    destroyRenderTarget(handle: unknown): void;
+    /** 把 EffectShader 编译成当前后端能用的东西；当前后端没有对应源码时返回 null */
+    compileEffect(shader: EffectShader): CompiledEffect | null;
+    destroyEffect(compiled: unknown): void;
     endFrame(): void;
     destroy(): void;
 }
@@ -469,6 +536,150 @@ void main() {
 
 const WHITE_PIXEL = new Uint8Array([255, 255, 255, 255]);
 
+/** 后处理用的全屏四边形（NDC 位置 + uv） */
+const GL_EFFECT_VERTEX = `
+precision highp float;
+
+attribute vec2 a_pos;
+
+varying vec2 uv;
+
+void main() {
+    // 这里采样的是离屏渲染目标（GL 约定 v=0 在底边），所以不做上下翻转：
+    // 每多翻一次，多趟特效链之后的整体方向就会错一次
+    uv = a_pos * 0.5 + 0.5;
+    gl_Position = vec4(a_pos, 0.0, 1.0);
+}
+`;
+
+/** 内置「原样拷贝」特效，用于把离屏纹理贴回画布 */
+const COPY_EFFECT_SHADER: EffectShader = {
+    name: "#copy",
+    glsl: `
+    void main() {
+        gl_FragColor = texture2D(screenTexture, uv);
+    }
+    `,
+    wgsl: `
+    return textureSample(screenTexture, samp, uv);
+    `,
+};
+
+/** WebGL 1 的离屏渲染目标 */
+interface WebGL1RenderTarget {
+    texture: WebGLTexture;
+    fbo: WebGLFramebuffer;
+    width: number;
+    height: number;
+}
+
+/** WebGL 1 编译好的特效着色器 */
+interface WebGL1EffectProgram extends CompiledEffect {
+    program: WebGLProgram;
+    /** uniform 缺省值（从 `// %def%` 注释解析） */
+    defaults: EffectUniforms;
+    pos: number;
+    screenTexture: WebGLUniformLocation | null;
+    screenSize: WebGLUniformLocation | null;
+    time: WebGLUniformLocation | null;
+    userUniforms: Map<string, WebGLUniformLocation | null>;
+}
+
+/**
+ * 拼出最终给 GL 的片元着色器源码。
+ *
+ * Phira 的自定义着色器是完整的 `#version 100` 片元着色器（自己声明 uv 等），
+ * 而我们内置的几个只写了 `main`，所以这里：
+ *  - 把 `#version` 摘到最前面（它必须在第一行）；
+ *  - 用户没声明的内置变量（uv / screenTexture / screenSize / time）补上，
+ *    已经声明过的就不重复声明，免得撞车。
+ */
+function buildEffectFragment(source: string): string {
+    let code = source.replace(/^\uFEFF/, "").trim();
+    code = code.replace(/^\s*#version[^\n]*\n?/, "");
+
+    const declarations: string[] = [];
+    const declared = (pattern: RegExp) => pattern.test(code);
+    if (!declared(/\bvarying\b[^;]*\buv\b\s*;/)) declarations.push("varying vec2 uv;");
+    if (!declared(/\buniform\b[^;]*\bscreenTexture\b\s*;/)) declarations.push("uniform sampler2D screenTexture;");
+    if (!declared(/\buniform\b[^;]*\bscreenSize\b\s*;/)) declarations.push("uniform vec2 screenSize;");
+    if (!declared(/\buniform\b[^;]*\btime\b\s*;/)) declarations.push("uniform float time;");
+
+    return [
+        "#version 100",
+        "precision mediump float;",
+        ...declarations,
+        code,
+    ].join("\n");
+}
+
+/**
+ * 从 WGSL 主体里解析 uniform 声明。
+ *
+ * WGSL 不能在函数体里声明 uniform，所以用一个注释指令代替：
+ *
+ * ```wgsl
+ * // @uniform float factor = 0.5
+ * // @uniform vec2 offset
+ * ```
+ *
+ * 类型写 GLSL 风格（float / vec2 / vec4）或 WGSL 风格（f32 / vec2f / vec4f）都行。
+ * 有 `glsl` 版本时通常不用写这些，直接复用 GLSL 的 uniform 声明。
+ */
+function parseWGSLUniforms(source: string): { layout: Record<string, 1 | 2 | 4>; defaults: EffectUniforms } {
+    const layout: Record<string, 1 | 2 | 4> = {};
+    const defaults: EffectUniforms = {};
+    const pattern = /\/\/\s*@uniform\s+(f32|float|vec2f|vec2|vec4f|vec4)\s+([A-Za-z_]\w*)(?:\s*=\s*([-\d.,\s]+))?/g;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(source)) !== null) {
+        const type = match[1]!;
+        const name = match[2]!;
+        layout[name] = type === "float" || type === "f32" ? 1 : type === "vec2" || type === "vec2f" ? 2 : 4;
+        const raw = match[3]?.trim();
+        if (raw === undefined || raw === "") continue;
+        const parts = raw.split(/[\s,]+/).filter(Boolean).map(Number);
+        if (parts.length && parts.every(item => Number.isFinite(item))) {
+            defaults[name] = parts.length === 1 ? parts[0]! : parts as [number, number] | [number, number, number, number];
+        }
+    }
+    return { layout, defaults };
+}
+
+/** 从 GLSL 源码里解析 uniform 声明（含 `// %默认值%`） */
+function parseGLSLUniforms(source: string): { layout: Record<string, 1 | 2 | 4>; defaults: EffectUniforms } {
+    const layout: Record<string, 1 | 2 | 4> = {};
+    const defaults: EffectUniforms = {};
+    const pattern = /uniform\s+(float|vec2|vec4)\s+(\w+)\s*;(?:\s*\/\/\s*%([^%]*)%)?/g;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(source)) !== null) {
+        const type = match[1]!;
+        const name = match[2]!;
+        if (name === "screenTexture" || name === "screenSize" || name === "time") continue;
+        layout[name] = type === "float" ? 1 : type === "vec2" ? 2 : 4;
+        if (match[3] !== undefined) {
+            const raw = match[3].trim();
+            const parts = raw.split(/[\s,]+/).filter(Boolean).map(Number);
+            if (parts.length && parts.every(item => Number.isFinite(item))) {
+                defaults[name] = parts.length === 1 ? parts[0]! : parts as [number, number] | [number, number, number, number];
+            }
+        }
+    }
+    return { layout, defaults };
+}
+
+/**
+ * 解析着色器的 uniform 布局：GLSL 的 `uniform` 声明 + WGSL 的 `// @uniform` 注释，
+ * 显式给了 `shader.layout` 的话以它为准（只覆盖同名项）。
+ */
+function resolveEffectLayout(shader: EffectShader): { layout: Record<string, 1 | 2 | 4>; defaults: EffectUniforms } {
+    const glsl = shader.glsl ? parseGLSLUniforms(shader.glsl) : null;
+    const wgsl = shader.wgsl ? parseWGSLUniforms(shader.wgsl) : null;
+    return {
+        layout: { ...glsl?.layout, ...wgsl?.layout, ...shader.layout },
+        defaults: { ...glsl?.defaults, ...wgsl?.defaults },
+    };
+}
+
 class WebGL1Backend implements RenderBackend {
     readonly kind: BackendKind = "webgl1";
 
@@ -481,6 +692,20 @@ class WebGL1Backend implements RenderBackend {
     private readonly instanceBuffer: WebGLBuffer;
     private readonly white: WebGLTexture;
     private readonly textures = new Set<WebGLTexture>();
+
+    /** 后处理：全屏四边形缓冲（pos.xy + uv.xy） */
+    private readonly effectQuad: WebGLBuffer;
+    /** 离屏渲染目标 */
+    private readonly targets = new Set<WebGL1RenderTarget>();
+    private currentTarget: WebGL1RenderTarget | null = null;
+    private frameWidth = 0;
+    private frameHeight = 0;
+    private clearColor: RGBA | null = null;
+    private canvasCleared = false;
+    /** 当前绑定的 program，特效 pass 和实例化绘制会来回切 */
+    private programInUse: WebGLProgram | null = null;
+    /** 贴回画布用的拷贝 program（缓存，别每帧新建） */
+    private copyProgram: WebGL1EffectProgram | null = null;
 
     constructor(canvas: HTMLCanvasElement | OffscreenCanvas) {
         const gl = canvas.getContext("webgl", {
@@ -525,6 +750,16 @@ class WebGL1Backend implements RenderBackend {
         // 纯色图元用一个 1x1 白纹理，避免额外流水线
         this.white = this.uploadTexture(WHITE_PIXEL, 1, 1) as WebGLTexture;
         this.textures.add(this.white);
+
+        // 后处理全屏四边形：(-1,-1) (1,-1) (-1,1) (1,1)，交错存 pos.xy + uv.xy
+        this.effectQuad = gl.createBuffer()!;
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.effectQuad);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+            -1, -1, 0, 0,
+            1, -1, 1, 0,
+            -1, 1, 0, 1,
+            1, 1, 1, 1,
+        ]), gl.STATIC_DRAW);
 
         gl.disable(gl.DEPTH_TEST);
         gl.disable(gl.CULL_FACE);
@@ -588,16 +823,62 @@ class WebGL1Backend implements RenderBackend {
 
     beginFrame(width: number, height: number, zRange: [number, number], clear: RGBA | null) {
         const gl = this.gl;
+        this.frameWidth = width;
+        this.frameHeight = height;
+        this.clearColor = clear;
+        this.currentTarget = null;
+        // 画布的清除延迟到第一次往画布画的时候（有特效时整帧都画在离屏纹理上，最后才贴回来）
+        this.canvasCleared = false;
         gl.viewport(0, 0, width, height);
-        if (clear) {
-            gl.clearColor(clear[0], clear[1], clear[2], clear[3]);
-            gl.clear(gl.COLOR_BUFFER_BIT);
-        }
-        gl.useProgram(this.program);
+        this.useProgram(this.program);
         gl.uniform2f(this.uniforms.viewport, width, height);
         const span = zRange[1] - zRange[0];
         gl.uniform2f(this.uniforms.zRange, zRange[0], span === 0 ? 0 : 1 / span);
         gl.activeTexture(gl.TEXTURE0);
+    }
+
+    /**
+     * 切换渲染目标；null 表示画布。
+     * **不清离屏目标** —— 需要清的时候走 {@linkcode clearRenderTarget}，
+     * 否则整帧累积目标会在中途被误清（特效链跑完回到它的时候就全没了）。
+     */
+    private bindTarget(target: WebGL1RenderTarget | null) {
+        if (this.currentTarget === target && (target !== null || this.canvasCleared)) return;
+        const gl = this.gl;
+        this.currentTarget = target;
+        if (target) {
+            gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+            gl.viewport(0, 0, target.width, target.height);
+        } else {
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            gl.viewport(0, 0, this.frameWidth, this.frameHeight);
+            if (!this.canvasCleared) {
+                this.canvasCleared = true;
+                if (this.clearColor) {
+                    gl.clearColor(this.clearColor[0], this.clearColor[1], this.clearColor[2], this.clearColor[3]);
+                    gl.clear(gl.COLOR_BUFFER_BIT);
+                }
+            }
+        }
+    }
+
+    /** 把某块离屏纹理清成全透明（每段内容/每趟中间结果用之前调一次） */
+    clearRenderTarget(handle: unknown) {
+        const target = handle as WebGL1RenderTarget | null;
+        if (!target) return;
+        const gl = this.gl;
+        this.currentTarget = target;
+        gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+        gl.viewport(0, 0, target.width, target.height);
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+    }
+
+    /** 切换 program（重复设置同一个很廉价，记一下省得每帧刷状态） */
+    private useProgram(program: WebGLProgram) {
+        if (this.programInUse === program) return;
+        this.programInUse = program;
+        this.gl.useProgram(program);
     }
 
     uploadInstances(data: Float32Array, count: number) {
@@ -606,9 +887,12 @@ class WebGL1Backend implements RenderBackend {
         gl.bufferData(gl.ARRAY_BUFFER, data.subarray(0, count * INSTANCE_FLOATS), gl.DYNAMIC_DRAW);
     }
 
-    drawInstances(texture: unknown, blend: number, first: number, count: number) {
+    drawInstances(texture: unknown, blend: number, first: number, count: number, target?: unknown) {
         const gl = this.gl;
         const ext = this.ext;
+        this.bindTarget((target as WebGL1RenderTarget | null | undefined) ?? null);
+        // 特效 pass 换过 program，回到实例化绘制时必须切回来（uniform 仍留在主 program 上）
+        this.useProgram(this.program);
 
         switch (blend) {
             case BLEND_DESTINATION_OUT:
@@ -647,14 +931,127 @@ class WebGL1Backend implements RenderBackend {
         ext.drawArraysInstancedANGLE(gl.TRIANGLE_STRIP, 0, 4, count);
     }
 
-    endFrame() { }
+    createRenderTarget(width: number, height: number) {
+        const gl = this.gl;
+        const texture = gl.createTexture()!;
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0);
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 1);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+        const fbo = gl.createFramebuffer()!;
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+        const target: WebGL1RenderTarget = { texture, fbo, width, height };
+        this.targets.add(target);
+        return target;
+    }
+
+    destroyRenderTarget(handle: unknown) {
+        const target = handle as WebGL1RenderTarget;
+        if (!target) return;
+        this.targets.delete(target);
+        if (this.currentTarget === target) this.currentTarget = null;
+        this.gl.deleteFramebuffer(target.fbo);
+        this.gl.deleteTexture(target.texture);
+    }
+
+    compileEffect(shader: EffectShader): CompiledEffect | null {
+        if (!shader.glsl) return null;
+        const gl = this.gl;
+        const { layout, defaults } = resolveEffectLayout(shader);
+        const program = this.buildProgram(GL_EFFECT_VERTEX, buildEffectFragment(shader.glsl));
+        const compiled: WebGL1EffectProgram = {
+            layout,
+            defaults,
+            program,
+            pos: gl.getAttribLocation(program, "a_pos"),
+            screenTexture: gl.getUniformLocation(program, "screenTexture"),
+            screenSize: gl.getUniformLocation(program, "screenSize"),
+            time: gl.getUniformLocation(program, "time"),
+            userUniforms: new Map(),
+        };
+        this.useProgram(program);
+        gl.uniform1i(compiled.screenTexture, 0);
+        for (const name of Object.keys(layout)) {
+            compiled.userUniforms.set(name, gl.getUniformLocation(program, name));
+        }
+        return compiled;
+    }
+
+    destroyEffect(compiled: unknown) {
+        const effect = compiled as WebGL1EffectProgram;
+        if (!effect) return;
+        this.gl.deleteProgram(effect.program);
+    }
+
+    runEffect(compiled: unknown, source: unknown, target: unknown, uniforms: EffectUniforms, width: number, height: number, time: number) {
+        const gl = this.gl;
+        const effect = compiled as WebGL1EffectProgram;
+        this.bindTarget((target as WebGL1RenderTarget | null | undefined) ?? null);
+        // 特效不清目标：它要叠加在当前内容上面
+
+        this.useProgram(effect.program);
+        // source 是离屏渲染目标句柄，纹理在里面，不能直接 bind 句柄
+        const sourceTexture = (source as WebGL1RenderTarget | null)?.texture;
+        if (!sourceTexture) return;
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, sourceTexture);
+        gl.uniform1i(effect.screenTexture, 0);
+        gl.uniform2f(effect.screenSize, width, height);
+        gl.uniform1f(effect.time, time);
+
+        for (const [name, components] of Object.entries(effect.layout)) {
+            const location = effect.userUniforms.get(name);
+            if (!location) continue;
+            const value = uniforms[name] ?? effect.defaults[name];
+            if (value === undefined) continue;
+            const numbers = typeof value === "number" ? [value] : value;
+            if (components === 1) gl.uniform1f(location, numbers[0]!);
+            else if (components === 2) gl.uniform2f(location, numbers[0]!, numbers[1]!);
+            else gl.uniform4f(location, numbers[0]!, numbers[1]!, numbers[2]!, numbers[3]!);
+        }
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.effectQuad);
+        gl.vertexAttribPointer(effect.pos, 2, gl.FLOAT, false, 16, 0);
+        gl.enableVertexAttribArray(effect.pos);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+
+    /** 把离屏纹理原样贴到 target（画布会按 beginFrame 传的清屏色先清一次） */
+    blit(source: unknown, target: unknown) {
+        this.copyProgram ??= this.compileEffect(COPY_EFFECT_SHADER) as WebGL1EffectProgram | null;
+        if (!this.copyProgram) return;
+        this.runEffect(this.copyProgram, source, target, {}, this.frameWidth, this.frameHeight, 0);
+    }
+
+    /** 这一帧什么都没画时也要把画布清掉，否则会留着上一帧的画面 */
+    clearFrame() {
+        this.bindTarget(null);
+    }
+
+    endFrame() {
+        this.currentTarget = null;
+    }
 
     destroy() {
         const gl = this.gl;
         for (const texture of this.textures) gl.deleteTexture(texture);
         this.textures.clear();
+        for (const target of this.targets) {
+            gl.deleteFramebuffer(target.fbo);
+            gl.deleteTexture(target.texture);
+        }
+        this.targets.clear();
         gl.deleteBuffer(this.quadBuffer);
         gl.deleteBuffer(this.instanceBuffer);
+        gl.deleteBuffer(this.effectQuad);
         gl.deleteProgram(this.program);
     }
 }
@@ -711,12 +1108,81 @@ fn fs(frag: VSOut) -> @location(0) vec4f {
 }
 `;
 
+/** 按 WGSL 的 uniform 布局规则排布 screenSize / time / 用户 uniform */
+function buildWGSLUniformLayout(user: { name: string; components: 1 | 2 | 4 }[]) {
+    const alignOf = (components: number) => (components === 1 ? 4 : components === 2 ? 8 : 16);
+    const sizeOf = (components: number) => (components === 1 ? 4 : components === 2 ? 8 : 16);
+    const typeOf = (components: number) => (components === 1 ? "f32" : components === 2 ? "vec2f" : "vec4f");
+
+    const fields = ["screenSize: vec2f", "time: f32"];
+    const offsets: Record<string, number> = {};
+    let offset = 12;                      // screenSize@0 + time@8
+    let maxAlign = 8;
+
+    for (const { name, components } of user) {
+        const align = alignOf(components);
+        maxAlign = Math.max(maxAlign, align);
+        offset = Math.ceil(offset / align) * align;
+        offsets[name] = offset;
+        fields.push(`${name}: ${typeOf(components)}`);
+        offset += sizeOf(components);
+    }
+
+    return { fields, offsets, size: Math.ceil(offset / maxAlign) * maxAlign };
+}
+
+/** 把用户的 WGSL 片元主体包进完整模块，并注入 Phira 约定的内置变量 */
+function wrapWGSL(body: string, fields: string[]): string {
+    const aliases = fields.slice(2).map(field => `    let ${field.split(":")[0]!.trim()} = u.${field.split(":")[0]!.trim()};`).join("\n");
+    return `
+struct EffectUniforms {
+    ${fields.join(",\n    ")},
+};
+
+@group(0) @binding(0) var<uniform> u: EffectUniforms;
+@group(0) @binding(1) var samp: sampler;
+@group(0) @binding(2) var tex: texture_2d<f32>;
+
+struct VSOut {
+    @builtin(position) position: vec4f,
+    @location(0) uv: vec2f,
+};
+
+@vertex
+fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
+    var corners = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+    var out: VSOut;
+    let p = corners[vi];
+    out.position = vec4f(p, 0.0, 1.0);
+    // 采样的是离屏渲染目标，v=0 在底边，不做上下翻转
+    out.uv = p * 0.5 + 0.5;
+    return out;
+}
+
+@fragment
+fn fs(in: VSOut) -> @location(0) vec4f {
+    let screenSize = u.screenSize;
+    let time = u.time;
+    let screenTexture = tex;
+${aliases}
+${body}
+}
+`;
+}
+
 class WebGPUBackend implements RenderBackend {
     readonly kind: BackendKind = "webgpu";
 
-    private readonly encoderHolder: { encoder: any; pass: any } = { encoder: null, pass: null };
+    /** 一帧里可能有多个 render pass（画布 + 若干离屏纹理），最后一起 submit */
+    private readonly frames: { encoder: any; pass: any }[] = [];
+    private active: { encoder: any; pass: any } | null = null;
+    private activeView: any = null;
+    private canvasView: any = null;
+    private canvasOpened = false;
+    private clearColor: RGBA | null = null;
     private readonly instanceState = { buffer: null as any, capacity: 0 };
     private readonly textures = new Set<any>();
+    private readonly targets = new Set<any>();
     /**
      * 被本轮 pass 引用过、但已经被替换掉的 buffer。
      * WebGPU 不允许在 submit 之前 destroy 掉 command buffer 里用到的资源，
@@ -724,6 +1190,8 @@ class WebGPUBackend implements RenderBackend {
      */
     private readonly retiredBuffers: any[] = [];
     private white: any = null;
+    /** 特效管线（按 EffectShader 缓存） */
+    private readonly effectPrograms = new Map<EffectShader, any>();
 
     private constructor(
         private readonly device: any,
@@ -734,6 +1202,7 @@ class WebGPUBackend implements RenderBackend {
         private readonly quadBuffer: any,
         private readonly bindGroupLayout: any,
         private readonly sampler: any,
+        private readonly format: any,
     ) { }
 
     static async create(canvas: HTMLCanvasElement | OffscreenCanvas, device?: unknown): Promise<WebGPUBackend> {
@@ -804,7 +1273,7 @@ class WebGPUBackend implements RenderBackend {
         const sampler = dev.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
         const bindGroupLayout = pipelines[0]!.getBindGroupLayout(0);
 
-        const backend = new WebGPUBackend(dev, context, pipelines, uniformBuffer, uniformData, quadBuffer, bindGroupLayout, sampler);
+        const backend = new WebGPUBackend(dev, context, pipelines, uniformBuffer, uniformData, quadBuffer, bindGroupLayout, sampler, format);
 
         // 1x1 白纹理
         const whiteTexture = dev.createTexture({
@@ -875,12 +1344,25 @@ class WebGPUBackend implements RenderBackend {
         this.uniformData[3] = span === 0 ? 0 : 1 / span;
         device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData);
 
-        const encoder = device.createCommandEncoder();
+        // pass 延迟到真正开始画的时候再开：有特效时整帧都画在离屏纹理上，
+        // 最后才贴回画布，画布的 clear 也顺延到那一刻。
+        this.frames.length = 0;
+        this.active = null;
+        this.activeView = null;
+        this.canvasView = null;
+        this.canvasOpened = false;
+        this.clearColor = clear;
+    }
+
+    /** 结束当前 pass，开一个画到 view 上的新 pass */
+    private openPass(view: any, clear: boolean) {
+        if (this.active) this.active.pass.end();
+        const encoder = this.device.createCommandEncoder();
         const pass = encoder.beginRenderPass({
             colorAttachments: [{
-                view: this.context.getCurrentTexture().createView(),
-                clearValue: clear
-                    ? { r: clear[0], g: clear[1], b: clear[2], a: clear[3] }
+                view,
+                clearValue: this.clearColor
+                    ? { r: this.clearColor[0], g: this.clearColor[1], b: this.clearColor[2], a: this.clearColor[3] }
                     : { r: 0, g: 0, b: 0, a: 0 },
                 loadOp: clear ? "clear" : "load",
                 storeOp: "store",
@@ -888,20 +1370,43 @@ class WebGPUBackend implements RenderBackend {
         });
         pass.setVertexBuffer(0, this.quadBuffer);
         if (this.instanceState.buffer) pass.setVertexBuffer(1, this.instanceState.buffer);
-        this.encoderHolder.encoder = encoder;
-        this.encoderHolder.pass = pass;
+        this.frames.push({ encoder, pass });
+        this.active = { encoder, pass };
+        this.activeView = view;
+    }
+
+    /** 确保当前 pass 画在 target 上；target 为 null 表示画布 */
+    private bindTarget(target: any) {
+        if (target) {
+            // 不清屏：需要清的时候走 clearRenderTarget，
+            // 否则整帧累积目标会在特效链跑完回到它的时候被误清
+            if (this.activeView !== target.view) this.openPass(target.view, false);
+            return;
+        }
+        if (this.canvasOpened) return;
+        this.canvasOpened = true;
+        if (!this.canvasView) this.canvasView = this.context.getCurrentTexture().createView();
+        this.openPass(this.canvasView, this.clearColor !== null);
+    }
+
+    /** 把某块离屏纹理清成全透明 */
+    clearRenderTarget(handle: unknown) {
+        const target = handle as { view: any } | null;
+        if (!target) return;
+        this.openPass(target.view, true);
     }
 
     uploadInstances(data: Float32Array, count: number) {
         const needed = Math.max(INSTANCE_BYTES * count, INSTANCE_BYTES * 64);
         if (!this.instanceState.buffer || this.instanceState.capacity < needed) {
-            // 旧 buffer 已经被当前 pass 引用过，只能先退役，等下一帧开头再销毁
+            // 旧 buffer 可能已经被本帧的 pass 引用过，只能先退役，等下一帧开头再销毁
             if (this.instanceState.buffer) this.retiredBuffers.push(this.instanceState.buffer);
             // 留一倍余量，避免实例数一涨就重建
             const size = Math.max(needed * 2, INSTANCE_BYTES * 256);
             this.instanceState.buffer = this.device.createBuffer({ size, usage: 0x20 | 0x8 });
             this.instanceState.capacity = size;
-            this.encoderHolder.pass?.setVertexBuffer(1, this.instanceState.buffer);
+            // 已经开出来的 pass 也要重新指向新 buffer
+            for (const frame of this.frames) frame.pass.setVertexBuffer(1, this.instanceState.buffer);
         }
         this.device.queue.writeBuffer(this.instanceState.buffer, 0, data, 0, count * INSTANCE_FLOATS);
     }
@@ -912,25 +1417,145 @@ class WebGPUBackend implements RenderBackend {
         this.retiredBuffers.length = 0;
     }
 
-    drawInstances(texture: unknown, blend: number, first: number, count: number) {
-        const pass = this.encoderHolder.pass;
+    drawInstances(texture: unknown, blend: number, first: number, count: number, target?: unknown) {
+        this.bindTarget(target ?? null);
+        const pass = this.active!.pass;
         const handle = texture as { group: unknown } | null;
         pass.setPipeline(this.pipelines[blend] ?? this.pipelines[0]);
         pass.setBindGroup(0, handle ? handle.group : this.white.group);
         pass.draw(4, count, 0, first);
     }
 
+    createRenderTarget(width: number, height: number) {
+        const texture = this.device.createTexture({
+            size: [Math.max(1, width), Math.max(1, height), 1],
+            format: "rgba8unorm",
+            usage: 0x10 | 0x4 | 0x2,   // TEXTURE_BINDING | RENDER_ATTACHMENT | COPY_DST
+        });
+        const handle = { texture, view: texture.createView(), width, height };
+        this.targets.add(handle);
+        return handle;
+    }
+
+    destroyRenderTarget(handle: unknown) {
+        const target = handle as { texture: any };
+        if (!target) return;
+        this.targets.delete(target);
+        target.texture.destroy();
+    }
+
+    compileEffect(shader: EffectShader): CompiledEffect | null {
+        if (!shader.wgsl) return null;
+        const cached = this.effectPrograms.get(shader);
+        if (cached) return cached;
+
+        const { layout, defaults } = resolveEffectLayout(shader);
+        const names = Object.keys(layout);
+        const { fields, offsets, size } = buildWGSLUniformLayout(names.map(name => ({ name, components: layout[name]! })));
+
+        const module = this.device.createShaderModule({ code: wrapWGSL(shader.wgsl, fields) });
+        const pipeline = this.device.createRenderPipeline({
+            layout: "auto",
+            vertex: { module, entryPoint: "vs" },
+            fragment: { module, entryPoint: "fs", targets: [{ format: this.format, blend: {
+                color: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
+                alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
+            } }] },
+            primitive: { topology: "triangle-list" },
+        });
+
+        const compiled = {
+            layout,
+            defaults,
+            offsets,
+            size,
+            data: new Float32Array(size / 4),
+            pipeline,
+            bindGroupLayout: pipeline.getBindGroupLayout(0),
+            buffer: this.device.createBuffer({ size, usage: 0x40 | 0x8 }),   // UNIFORM | COPY_DST
+        };
+        this.effectPrograms.set(shader, compiled);
+        return compiled;
+    }
+
+    destroyEffect(compiled: unknown) {
+        const effect = compiled as { buffer: any };
+        if (!effect) return;
+        effect.buffer.destroy();
+    }
+
+    runEffect(compiled: unknown, source: unknown, target: unknown, uniforms: EffectUniforms, width: number, height: number, time: number) {
+        const effect = compiled as {
+            layout: Record<string, 1 | 2 | 4>;
+            defaults: EffectUniforms;
+            offsets: Record<string, number>;
+            data: Float32Array;
+            pipeline: any;
+            bindGroupLayout: any;
+            buffer: any;
+        };
+        const sourceHandle = source as { view: any };
+
+        // uniform 打包：screenSize + time 在最前面，随后是用户 uniform（顺序同 layout）
+        effect.data[0] = width;
+        effect.data[1] = height;
+        effect.data[2] = time;
+        for (const [name, components] of Object.entries(effect.layout)) {
+            // 谱面没给这个变量时用着色器里声明的默认值
+            const value = uniforms[name] ?? effect.defaults[name];
+            if (value === undefined) continue;
+            const offset = effect.offsets[name]! / 4;
+            const numbers = typeof value === "number" ? [value] : value;
+            for (let i = 0; i < components; i++) effect.data[offset + i] = numbers[i] ?? 0;
+        }
+        this.device.queue.writeBuffer(effect.buffer, 0, effect.data);
+
+        this.bindTarget(target ?? null);
+        const pass = this.active!.pass;
+        pass.setPipeline(effect.pipeline);
+        pass.setBindGroup(0, this.device.createBindGroup({
+            layout: effect.bindGroupLayout,
+            entries: [
+                { binding: 0, resource: { buffer: effect.buffer } },
+                { binding: 1, resource: this.sampler },
+                { binding: 2, resource: sourceHandle.view },
+            ],
+        }));
+        pass.draw(3);
+    }
+
+    /** 把离屏纹理原样贴到 target（null = 画布） */
+    blit(source: unknown, target: unknown) {
+        const compiled = this.compileEffect(COPY_EFFECT_SHADER);
+        if (compiled) {
+            this.runEffect(compiled, source, target, {}, this.uniformData[0], this.uniformData[1], 0);
+        }
+    }
+
+    clearFrame() {
+        this.bindTarget(null);
+    }
+
     endFrame() {
-        this.encoderHolder.pass.end();
-        this.device.queue.submit([this.encoderHolder.encoder.finish()]);
-        this.encoderHolder.pass = null;
-        this.encoderHolder.encoder = null;
+        if (this.active) {
+            this.active.pass.end();
+            this.active = null;
+            this.activeView = null;
+        }
+        if (this.frames.length === 0) return;
+        const encoders = this.frames.map(frame => frame.encoder.finish());
+        this.frames.length = 0;
+        this.device.queue.submit(encoders);
     }
 
     destroy() {
         this.sweepRetiredBuffers();
         for (const handle of this.textures) handle.texture?.destroy();
         this.textures.clear();
+        for (const target of this.targets) target.texture.destroy();
+        this.targets.clear();
+        for (const effect of this.effectPrograms.values()) effect.buffer.destroy();
+        this.effectPrograms.clear();
         this.instanceState.buffer?.destroy();
         this.uniformBuffer.destroy?.();
         this.quadBuffer.destroy?.();
@@ -1523,11 +2148,26 @@ export class AnyGPUContext2D {
 
     private combinedScratch: Float32Array = new Float32Array(0);
     private sortedScratch: Float32Array = new Float32Array(0);
+    /** 与 sortedScratch 一一对应的纹理引用 */
+    private sortedTextures: (Texture | null)[] = [];
 
     private textCanvas: AnyCanvas2D | null = null;
     private textContext: AnyCanvas2DContext | null = null;
     /** VideoFrame → canvas 的复用缓冲（WebGL 1 用） */
     private videoScratch: { canvas: AnyCanvas2D; ctx: AnyCanvas2DContext } | null = null;
+
+    /* ------------------------------ 特效 ------------------------------ */
+
+    /** 已注册的着色器，按名字索引 */
+    private readonly shaderRegistry = new Map<string, EffectShader>();
+    /** 已编译的着色器（按 EffectShader 对象缓存，避免每帧重新编译） */
+    private readonly compiledShaders = new Map<EffectShader, CompiledEffect>();
+    /** 本帧的特效区间，按 from 升序、互不重叠 */
+    private effectRanges: EffectRange[] = [];
+    /** 后处理用的离屏纹理：[0] 是整帧的累积目标，其余是特效链的中间结果 */
+    private scratchTargets: unknown[] | null = null;
+    /** 本帧跑过的特效着色器趟数 */
+    private effectPasses = 0;
 
     private constructor(
         readonly canvas: HTMLCanvasElement | OffscreenCanvas,
@@ -1598,6 +2238,99 @@ export class AnyGPUContext2D {
         const index = this.layerList.indexOf(layer);
         if (index >= 0) this.layerList.splice(index, 1);
     }
+
+    /* ------------------------- 特效：注册与区间 ------------------------- */
+
+    /** 注册一个特效着色器（同名会覆盖） */
+    addShader(shader: EffectShader) {
+        const previous = this.shaderRegistry.get(shader.name);
+        if (previous && previous !== shader) {
+            const compiled = this.compiledShaders.get(previous);
+            if (compiled) {
+                this.backend.destroyEffect(compiled);
+                this.compiledShaders.delete(previous);
+            }
+        }
+        this.shaderRegistry.set(shader.name, shader);
+    }
+
+    addShaders(shaders: readonly EffectShader[]) {
+        for (const shader of shaders) this.addShader(shader);
+    }
+
+    /** 取已注册的着色器 */
+    getShader(name: string): EffectShader | undefined {
+        return this.shaderRegistry.get(name);
+    }
+
+    /** 反注册着色器（会连编译结果一起释放） */
+    removeShader(name: string) {
+        const shader = this.shaderRegistry.get(name);
+        if (!shader) return;
+        this.shaderRegistry.delete(name);
+        const compiled = this.compiledShaders.get(shader);
+        if (compiled) {
+            this.backend.destroyEffect(compiled);
+            this.compiledShaders.delete(shader);
+        }
+    }
+
+    /**
+     * 设置某个 z 区间上依次应用的特效链。
+     *
+     * 区间是**左闭右开**的 `[from, to)`，同一区间重复设置会覆盖。
+     * 特效在每帧 flush 时才真正执行，因此这里只记录请求，uniform 的值随取随用。
+     *
+     * ```ts
+     * // 只让 [0, 9) 的谱面图层过一遍模糊，UI（z=9）不受影响
+     * gpu.setEffect(0, 9, [{ shader: "blur", uniforms: { radius: 4 } }]);
+     * ```
+     */
+    setEffect(from: number, to: number, chain: readonly EffectRequest[]) {
+        if (!(to > from) || chain.length === 0) {
+            this.clearEffect(from, to);
+            return;
+        }
+        // 区间不允许重叠：后来设置的会顶掉重叠的旧区间
+        this.effectRanges = this.effectRanges.filter(range => range.to <= from || range.from >= to);
+        const range: EffectRange = { from, to, chain: [...chain] };
+        const index = this.effectRanges.findIndex(item => item.from >= from);
+        this.effectRanges.splice(Math.max(index, 0), 0, range);
+    }
+
+    /** 清除某个 z 区间上的特效 */
+    clearEffect(from: number, to: number) {
+        this.effectRanges = this.effectRanges.filter(range => range.to <= from || range.from >= to);
+    }
+
+    /** 清掉所有特效区间（每帧重新设置即可） */
+    clearEffects() {
+        this.effectRanges = [];
+    }
+
+    /** 当前设置的特效区间（调试用） */
+    get effects(): readonly EffectRange[] {
+        return this.effectRanges;
+    }
+
+    /** 把着色器编译成当前后端能用的东西；当前后端没有对应源码 / 编译失败时返回 null */
+    private compileEffectFor(shader: EffectShader): CompiledEffect | null {
+        const cached = this.compiledShaders.get(shader);
+        if (cached) return cached;
+        let compiled: CompiledEffect | null = null;
+        try {
+            compiled = this.backend.compileEffect(shader);
+        } catch (error) {
+            // 谱面自带的自定义着色器可能有语法错误，别让它把整帧带崩
+            console.warn(`[AnyGPUContext2D] 特效着色器编译失败，已跳过: ${shader.name}`, error);
+            compiled = null;
+        }
+        if (compiled) this.compiledShaders.set(shader, compiled);
+        return compiled;
+    }
+
+    /** 特效着色器里的 `time`（秒） */
+    time = 0;
 
     /** 取（并按需上传）一张图片对应的纹理 */
     getTexture(image: TexImageSource): Texture {
@@ -1755,6 +2488,7 @@ export class AnyGPUContext2D {
         const height = Math.max(1, this.canvas.height);
 
         this.backend.beginFrame(width, height, this.range, this.clearColor);
+        this.effectPasses = 0;
 
         let total = 0;
         let batches = 0;
@@ -1781,46 +2515,28 @@ export class AnyGPUContext2D {
 
             const sorted = this.ensure(this.sortedScratch, total * INSTANCE_FLOATS);
             this.sortedScratch = sorted;
-
-            const batchFirst: number[] = [];
-            const batchCount: number[] = [];
-            const batchTexture: (Texture | null)[] = [];
-            const batchBlend: number[] = [];
-
-            let previousTexture: Texture | null | undefined;
-            let previousBlend = -1;
+            const sortedTextures = this.ensureTextures(total);
+            this.sortedTextures = sortedTextures;
 
             for (let k = 0; k < total; k++) {
                 const source = order[k]!;
                 const offset = source * INSTANCE_FLOATS;
                 sorted.set(combined.subarray(offset, offset + INSTANCE_FLOATS), k * INSTANCE_FLOATS);
-
-                const texture = textures[source] ?? null;
-                const blend = combined[offset + OFFSET_BLEND]!;
-                if (k === 0 || texture !== previousTexture || blend !== previousBlend) {
-                    batchFirst.push(k);
-                    batchCount.push(1);
-                    batchTexture.push(texture);
-                    batchBlend.push(blend);
-                } else {
-                    batchCount[batchCount.length - 1]!++;
-                }
-                previousTexture = texture;
-                previousBlend = blend;
+                sortedTextures[k] = textures[source] ?? null;
             }
 
             this.backend.uploadInstances(sorted, total);
-            batches = batchFirst.length;
 
-            for (let i = 0; i < batchFirst.length; i++) {
-                const texture = batchTexture[i];
-                this.backend.drawInstances(
-                    texture ? texture.handle : null,
-                    batchBlend[i]!,
-                    batchFirst[i]!,
-                    batchCount[i]!,
-                );
+            const ranges = this.activeEffectRanges();
+            if (ranges.length === 0) {
+                // 快路径：没有任何特效，直接画到画布上
+                batches = this.renderSegments(0, total, null);
+            } else {
+                batches = this.renderWithEffects(total, ranges);
             }
+        } else {
+            // 空帧也要清一次画布，否则会留着上一帧的内容
+            this.backend.clearFrame();
         }
 
         this.backend.endFrame();
@@ -1831,7 +2547,166 @@ export class AnyGPUContext2D {
         // 必须在 endFrame 之后：本帧可能还有实例引用着它们。
         this.sweepTextures();
 
-        return { instances: total, batches };
+        return { instances: total, batches, effects: this.effectPasses };
+    }
+
+    /** 只留下链非空的区间，并按起点排序 */
+    private activeEffectRanges(): EffectRange[] {
+        const ranges: EffectRange[] = [];
+        for (const range of this.effectRanges) {
+            if (range.chain.length > 0) ranges.push(range);
+        }
+        ranges.sort((a, b) => a.from - b.from);
+        return ranges;
+    }
+
+    /** 把 [first, first + count) 按「纹理 + 混合模式」切批，画进 target */
+    private renderSegments(first: number, count: number, target: unknown): number {
+        const sorted = this.sortedScratch;
+        const batchFirst: number[] = [];
+        const batchCount: number[] = [];
+        const batchTexture: (Texture | null)[] = [];
+        const batchBlend: number[] = [];
+
+        let previousTexture: Texture | null | undefined;
+        let previousBlend = -1;
+
+        for (let k = first; k < first + count; k++) {
+            // 注意：纯色图元（fillRect 之类）的 texture 是 null，也必须 push，
+            // 否则后面的 batch 会和纹理数组错位，整帧贴图全乱
+            const texture = this.sortedTextures[k] ?? null;
+            const blend = sorted[k * INSTANCE_FLOATS + OFFSET_BLEND]!;
+            if (k === first || texture !== previousTexture || blend !== previousBlend) {
+                batchFirst.push(k);
+                batchCount.push(1);
+                batchTexture.push(texture);
+                batchBlend.push(blend);
+            } else {
+                batchCount[batchCount.length - 1]!++;
+            }
+            previousTexture = texture;
+            previousBlend = blend;
+        }
+
+        for (let i = 0; i < batchFirst.length; i++) {
+            const texture = batchTexture[i];
+            this.backend.drawInstances(
+                texture ? texture.handle : null,
+                batchBlend[i]!,
+                batchFirst[i]!,
+                batchCount[i]!,
+                target,
+            );
+        }
+        return batchFirst.length;
+    }
+
+    /**
+     * 有特效时的渲染流程：
+     *   每个区间的内容先画到离屏纹理，再依次过特效链，最后叠加到整帧累积目标上；
+     *   整帧画完后一次性贴回画布。
+     * 这样「只影响谱面、不影响 UI」只要让特效区间不含 UI 图层即可。
+     */
+    private renderWithEffects(total: number, ranges: EffectRange[]): number {
+        const width = Math.max(1, this.canvas.width);
+        const height = Math.max(1, this.canvas.height);
+
+        // [0] 整帧累积目标，[1] 区间内容，[2..] 特效链中间结果
+        const longest = ranges.reduce((max, range) => Math.max(max, range.chain.length), 0);
+        const needed = 1 + Math.max(1, longest);
+        if (!this.scratchTargets || this.scratchTargets.length < needed) {
+            this.releaseScratchTargets();
+            this.scratchTargets = [];
+            for (let i = 0; i < needed; i++) {
+                this.scratchTargets.push(this.backend.createRenderTarget(width, height));
+            }
+        }
+
+        const frame = this.scratchTargets[0]!;
+        const content = this.scratchTargets[1]!;
+        let batches = 0;
+
+        // 整帧累积目标每帧开始清一次
+        this.backend.clearRenderTarget(frame);
+
+        let index = 0;
+        let rangeIndex = 0;
+        while (index < total) {
+            const chain = this.chainAt(ranges, rangeIndex, this.sortedScratch[index * INSTANCE_FLOATS + OFFSET_Z]!);
+            // 同步推进区间游标
+            while (rangeIndex < ranges.length && ranges[rangeIndex]!.to < this.sortedScratch[index * INSTANCE_FLOATS + OFFSET_Z]!) rangeIndex++;
+
+            let end = index + 1;
+            while (end < total) {
+                const next = this.chainAt(ranges, rangeIndex, this.sortedScratch[end * INSTANCE_FLOATS + OFFSET_Z]!);
+                if (next !== chain) break;
+                end++;
+            }
+
+            const count = end - index;
+            if (!chain) {
+                batches += this.renderSegments(index, count, frame);
+            } else {
+                // 区间内容每次都从干净的纹理开始
+                this.backend.clearRenderTarget(content);
+                batches += this.renderSegments(index, count, content);
+
+                // 先把能用上的着色器挑出来：不存在 / 编译失败的直接跳过，
+                // 一个都不剩时原样把内容贴回去，绝不能让它消失
+                const usable: { effect: CompiledEffect; request: EffectRequest }[] = [];
+                for (const request of chain) {
+                    const shader = this.shaderRegistry.get(request.shader);
+                    if (!shader) continue;
+                    const effect = this.compileEffectFor(shader);
+                    if (!effect) continue;
+                    usable.push({ effect, request });
+                }
+
+                if (usable.length === 0) {
+                    // 静默降级：这个区间的着色器一个都用不了，就当作没有特效
+                    this.backend.blit(content, frame);
+                } else {
+                    let source = content;
+                    for (let i = 0; i < usable.length; i++) {
+                        const { effect, request } = usable[i]!;
+                        const last = i === usable.length - 1;
+                        const destination = last ? frame : this.scratchTargets[2 + i]!;
+                        // 中间结果整屏覆盖，先清掉残留
+                        if (!last) this.backend.clearRenderTarget(destination);
+                        this.backend.runEffect(
+                            effect,
+                            source,
+                            destination,
+                            request.uniforms ?? {},
+                            width, height, this.time,
+                        );
+                        this.effectPasses++;
+                        source = destination;
+                    }
+                }
+            }
+            index = end;
+        }
+
+        this.backend.blit(frame, null);
+        return batches;
+    }
+
+    /** z 处覆盖的特效链；区间左闭右开，没有则返回 null */
+    private chainAt(ranges: EffectRange[], from: number, z: number): EffectRequest[] | null {
+        for (let i = from; i < ranges.length; i++) {
+            const range = ranges[i]!;
+            if (range.to <= z) continue;
+            if (range.from > z) return null;
+            return range.chain;
+        }
+        return null;
+    }
+
+    private releaseScratchTargets() {
+        if (!this.scratchTargets) return;
+        for (const target of this.scratchTargets) this.backend.destroyRenderTarget(target);
+        this.scratchTargets = null;
     }
 
     /** 回收已淘汰且本帧不再被引用的纹理 */
@@ -1848,11 +2723,21 @@ export class AnyGPUContext2D {
         return new Float32Array(size);
     }
 
+    private ensureTextures(count: number): (Texture | null)[] {
+        if (this.sortedTextures.length >= count) return this.sortedTextures;
+        return new Array<(Texture | null)>(Math.max(count, this.sortedTextures.length * 2, 256));
+    }
+
     destroy() {
         this.sweepTextures();
+        this.releaseScratchTargets();
         for (const texture of this.ownedTextures) this.backend.destroyTexture(texture.handle);
         this.ownedTextures.clear();
         this.textCache.clear();
+        for (const compiled of this.compiledShaders.values()) this.backend.destroyEffect(compiled);
+        this.compiledShaders.clear();
+        this.shaderRegistry.clear();
+        this.effectRanges = [];
         this.layerList.length = 0;
         this.backend.destroy();
     }
