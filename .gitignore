@@ -35,3 +35,6 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 test
 *.code-workspace
+
+# 播放器构建产物（bun run build）
+index.js
