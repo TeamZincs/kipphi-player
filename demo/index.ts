@@ -124,7 +124,27 @@ fileInput.addEventListener("change", async (e) => {
     await new Promise((r) => {
         audio.oncanplay = r;
     })
-    const chart = Chart.fromRPEJSON(JSON.parse(new TextDecoder().decode(chartFile.buffer)), audio.duration);
+
+    // Phira 的 extra.json：BPM、视频通道、特效（effects）都在里面，
+    // 不传的话谱面就没有特效，scanAllShaders() 也会是空的
+    const extraFile = findFile("extra.json");
+    let extraJson: any = undefined;
+    if (extraFile) {
+        try {
+            const text = new TextDecoder().decode(extraFile.buffer).replace(/^\uFEFF/, "");
+            extraJson = JSON.parse(text);
+        } catch (error) {
+            console.warn("[demo] extra.json 解析失败，忽略:", error);
+        }
+    } else {
+        console.warn("[demo] 压缩包里没有 extra.json，特效和 BGA 都不会有");
+    }
+
+    const chart = Chart.fromRPEJSON(
+        JSON.parse(new TextDecoder().decode(chartFile.buffer)),
+        audio.duration,
+        extraJson,
+    );
     
     const background = await createImageBitmap(new Blob([illustrationFile.buffer]));
 
