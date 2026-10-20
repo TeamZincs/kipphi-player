@@ -122,14 +122,27 @@ fileInput.addEventListener("change", async (e) => {
     player.baseOffset = 0.20;
     player.showsRenderingBaseline = false;
     player.hitEffectNoFollows = true;
-    player.receive(chart, async (name) => {
-        const file = unzipped.files.find(file => file.name === name);
-        if (!file) {
-            return null;
-        } else {
-            return await createImageBitmap(new Blob([file.buffer]));
-        }
-    });
+    player.receive(
+        chart,
+        async (name) => {
+            const file = unzipped.files.find(file => file.name === name);
+            if (!file) {
+                return null;
+            } else {
+                return await createImageBitmap(new Blob([file.buffer]));
+            }
+        },
+        undefined,   // 还没做 BGA
+        async (path) => {
+            // Phira 的着色器路径形如 /xxx.frag，包内文件名通常不带开头的斜杠
+            const name = path.replace(/^\.?\//, "");
+            const file = unzipped.files.find(file => file.name === name || file.name === `./${name}`);
+            if (!file) {
+                return null;
+            }
+            return { name: path, glsl: new TextDecoder().decode(file.buffer) };
+        },
+    );
     window.addEventListener("keydown", (e) => {
         if (e.key !== " ") {
             return;
