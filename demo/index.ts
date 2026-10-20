@@ -2,18 +2,23 @@ import { Player, AudioProcessor, Images, Respack, VideoFrameSource, setWasmPath,
 import { Chart } from "kipphi";
 import { unzip } from "./unzip";
 
-// web-demuxer 的 wasm：demo 直接用 CDN，省得往 dist 里拷静态文件
-setWasmPath("https://cdn.jsdelivr.net/npm/web-demuxer@4/dist/wasm-files/web-demuxer.wasm");
+// web-demuxer 的 wasm 跟静态资源一起放在 public/ 里，离线也能跑
+setWasmPath("./web-demuxer.wasm");
 
 // 方便在控制台里调试：Player.debugTiming = true / Player.gpuEnabled = false
 (window as any).Player = Player;
 
 const canvas = document.getElementById("canvas") as HTMLCanvasElement;
 
-await Images.loadAndOptimize({
-    anchor: "./Anchor.png",
-    below: "./Below.png",
-});
+// 谱面字体（index.html 里 @font-face 声明）。等它真的加载完再开始画，
+// 否则前几帧的文字会用兜底字体渲染
+await Promise.all([
+    Images.loadAndOptimize({
+        anchor: "./Anchor.png",
+        below: "./Below.png",
+    }),
+    document.fonts.load("64px phigros"),
+]);
 
 const respack = await Respack.loadFromPhira(async (name) => {
     return await fetch(`./default/${name}`).then(r => r.blob())
@@ -93,6 +98,15 @@ fileInput.addEventListener("change", async (e) => {
     const file = fileInput.files[0];
 
     const unzipped = await unzip(file);
+
+    // 谱面里的资源路径可能带 `/`（Phira 的自定义着色器就是 `/xxx.frag`）或 `./` 前缀，
+    // 压缩包里的条目则不一定带，统一去掉前缀再比
+    const normalizePath = (path: string) => path.replace(/^(\.\/|\/)+/, "");
+    const findFile = (path: string) => {
+        const target = normalizePath(path);
+        return unzipped.files.find(file => normalizePath(file.name) === target);
+    };
+
     const infoTxt = unzipped.files.find(file => file.name === "info.txt");
     if (!infoTxt) {
         return alert("No info.txt");
@@ -128,7 +142,7 @@ fileInput.addEventListener("change", async (e) => {
     player.receive(
         chart,
         async (name) => {
-            const file = unzipped.files.find(file => file.name === name);
+            const file = findFile(name);
             if (!file) {
                 return null;
             } else {
@@ -137,19 +151,20 @@ fileInput.addEventListener("change", async (e) => {
         },
         async (name) => {
             // 和贴图一样，直接从压缩包根目录里找
-            const file = unzipped.files.find(file => file.name === name);
+            const file = findFile(name);
             if (!file) {
                 throw new Error(`压缩包里没有这个视频: ${name}`);
             }
             return await VideoFrameSource.from(new File([file.buffer], name));
         },
         async (path) => {
-            // Phira 的着色器路径形如 /xxx.frag，包内文件名通常不带开头的斜杠
-            const name = path.replace(/^\.?\//, "");
-            const file = unzipped.files.find(file => file.name === name || file.name === `./${name}`);
+            // Phira 的自定义着色器路径以 / 开头（如 /xxx.frag），包内条目一般不带
+            const file = findFile(path);
             if (!file) {
+                console.warn(`[demo] 压缩包里没有这个着色器: ${path}`);
                 return null;
             }
+            // 注册名必须和谱面里的 effect.shader 完全一致，所以这里用原始 path
             return { name: path, glsl: new TextDecoder().decode(file.buffer) };
         },
     );
