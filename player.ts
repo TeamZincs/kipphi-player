@@ -1894,8 +1894,13 @@ export class Player extends EventTarget {
         if (videoFetcher) {
             const videos = chart.scanAllVideos();
             for (const video of videos) {
-                const vid = await videoFetcher(video);
-                this.videoMapping.set(video, vid);
+                try {
+                    const vid = await videoFetcher(video);
+                    this.videoMapping.set(video, vid);
+                } catch (error) {
+                    // 单个视频加载失败不该拖垮整张谱面，画面上就是没有 BGA 而已
+                    console.warn(`[Player] 视频加载失败，已跳过: ${video}`, error);
+                }
             }
         }
     }
