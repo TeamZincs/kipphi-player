@@ -11,7 +11,14 @@ interface UnzipResult {
   success: boolean;
 }
 
-const workerSelf = self as unknown as DedicatedWorkerGlobalScope;
+/**
+ * 这里只用到 worker 全局的这两个成员。
+ * 不去引 `webworker` lib —— 它和 DOM lib 会为同名全局声明打架。
+ */
+const workerSelf = self as unknown as {
+  onmessage: ((event: MessageEvent<ArrayBuffer>) => void) | null;
+  postMessage(message: unknown, transfer?: Transferable[]): void;
+};
 
 workerSelf.onmessage = async (event: MessageEvent<ArrayBuffer>) => {
   try {

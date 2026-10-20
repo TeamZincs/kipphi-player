@@ -1,6 +1,9 @@
-import { Player, AudioProcessor, Images, Respack, type RendererPreference } from "..";
+import { Player, AudioProcessor, Images, Respack, VideoFrameSource, setWasmPath, type RendererPreference } from "..";
 import { Chart } from "kipphi";
 import { unzip } from "./unzip";
+
+// web-demuxer 的 wasm：demo 直接用 CDN，省得往 dist 里拷静态文件
+setWasmPath("https://cdn.jsdelivr.net/npm/web-demuxer@4/dist/wasm-files/web-demuxer.wasm");
 
 // 方便在控制台里调试：Player.debugTiming = true / Player.gpuEnabled = false
 (window as any).Player = Player;
@@ -132,7 +135,14 @@ fileInput.addEventListener("change", async (e) => {
                 return await createImageBitmap(new Blob([file.buffer]));
             }
         },
-        undefined,   // 还没做 BGA
+        async (name) => {
+            // 和贴图一样，直接从压缩包根目录里找
+            const file = unzipped.files.find(file => file.name === name);
+            if (!file) {
+                throw new Error(`压缩包里没有这个视频: ${name}`);
+            }
+            return await VideoFrameSource.from(new File([file.buffer], name));
+        },
         async (path) => {
             // Phira 的着色器路径形如 /xxx.frag，包内文件名通常不带开头的斜杠
             const name = path.replace(/^\.?\//, "");
