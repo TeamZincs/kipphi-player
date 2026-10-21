@@ -45,8 +45,22 @@ export class AudioProcessor {
         source.connect(this.gainNode)
         source.start(0);
     }
+    /**
+     * 录制时设上它：只记录打击音事件，不真的发声
+     *
+     * 录制结束后记得还原。
+     */
+    captureNoteSound?: (type: NoteType) => void;
+    /** 取某个音符类型对应的打击音 */
+    getNoteSound(type: NoteType): AudioBuffer | undefined {
+        return [this.tap, this.tap, this.flick, this.drag][type - 1];
+    }
     playNoteSound(type: NoteType) {
         if (!this.initialized) {
+            return;
+        }
+        if (this.captureNoteSound) {
+            this.captureNoteSound(type);
             return;
         }
         this.play([this.tap, this.tap, this.flick, this.drag][type - 1])

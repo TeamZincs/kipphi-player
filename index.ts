@@ -7,3 +7,4 @@ export * from "./context";
 export * from "./player";
 export * from "./respack";
 export * from "./video";
+export * from "./recorder";

@@ -291,6 +291,32 @@ player.use({
 
 也可以不用谱面的 effects，直接 `player.addEffectShader()` / `gpu.addShader()` 手工注册再 `setEffect()`。
 
+## 录制（WebCodecs）
+
+浏览器端可以直接把谱面渲染成视频，音视频一起出：
+
+```typescript
+import { recordPlayer } from "kipphi-player";
+
+const { blob, container, videoCodec, audioCodec } = await recordPlayer(player, {
+    target: "offscreen",        // 后台渲染；"canvas" 则录用户看得见的那块
+    fps: 60,
+    range: [0, 30],             // 秒，缺省整首
+    audio: { source: songFile },// 不给就试着 fetch player.audio.src（blob: 也行）
+    onProgress: (frame, total) => console.log(`${frame}/${total}`),
+});
+
+location.href = URL.createObjectURL(blob);
+```
+
+- **渲染完全手动驱动**：每帧 `offlineTime = t` → `render()` → 取一帧送 `VideoEncoder`，不跟随音频时钟，也不管主线程卡不卡；唯一会等的地方是 `encodeQueueSize`（>8 就等一轮事件循环）
+- **`target`**：`canvas` 录你给的那块画布；`offscreen` 会另开一块 `OffscreenCanvas` 重新建一个播放器（共用已加载的贴图/视频/适配器），用户看不到渲染过程
+- **容器/编码**：优先 MP4（H.264 baseline + AAC），环境不支持时自动退 WebM（VP9/VP8 + Opus）；也可以用 `container` / `video.codec` 指定
+- **音频**：BGM 解码后交给 `OfflineAudioContext`，打击音按渲染时收集到的时间点排进去，一起 `startRendering()` —— 不需要像服务端那样手写重采样和削波；打击音增益默认 0.5，与服务端录制一致
+- 录制期间播放器的实时循环是停的，结束后会恢复原来的播放状态；`offlineTime` 也会清掉
+
+限制：BGM 需要能拿到原始字节（`blob:` / 同源 http 即可）；拿不到时只出无声视频并 warn。Worker 版（渲染整个搬进 Worker）还没做，目前 `target` 只有 `canvas` / `offscreen` 两种。
+
 ## 用于后端
 得益于 `skia-canvas`，奇谱播放器也可用于Node.js或Bun等后端运行环境。
 

@@ -742,7 +742,17 @@ export class Player extends EventTarget {
     // #default
     audio: HTMLAudioElement;
     // #enddefault
-    private audioProcessor: AudioProcessor;
+    audioProcessor: AudioProcessor;
+    // #default
+    /**
+     * 离线渲染用的时钟（秒，未加 offset）
+     *
+     * 设上之后 `time` 就不再读 `audio.currentTime`，而是用这个值——
+     * 录制时逐帧推它即可，不用去 seek `<audio>`。
+     * 传 `null` 恢复成跟随音频。
+     */
+    offlineTime: number | null = null;
+    // #enddefault
     playing: boolean;
     background: ImageBitmap;
     blurredBackground: ProcessedTexture;
@@ -968,7 +978,9 @@ export class Player extends EventTarget {
 } */
     get time(): number {
         // #default
-        return (this.audio.currentTime || 0) - this.chart.offset / 1000 + this.baseOffset;
+        // 录制时走 offlineTime，正常播放时跟随音频
+        const current = this.offlineTime ?? this.audio.currentTime ?? 0;
+        return current - this.chart.offset / 1000 + this.baseOffset;
         // #enddefault
         /* #node {
         return this.audioCurrentTime - this.chart.offset / 1000 + this.baseOffset;
@@ -2236,6 +2248,18 @@ export class Player extends EventTarget {
     unwatch() {
         this.resourceWatcher?.detach();
         this.resourceWatcher = null;
+    }
+
+    /**
+     * 把已经加载好的资源交给另一个播放器（离屏录制用）
+     *
+     * 贴图 / 视频直接共用，适配器也一起带过去，这样对方 `receive()` 时不会重复取。
+     * @internal
+     */
+    copyResourcesTo(target: Player) {
+        target.textureMapping = new Map(this.textureMapping);
+        target.videoMapping = new Map(this.videoMapping);
+        target.adapter = this.adapter;
     }
 
     /**
