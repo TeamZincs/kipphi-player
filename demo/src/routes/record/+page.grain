@@ -92,6 +92,14 @@
 
 <canvas id="player-canvas" width="1600" height="900"></canvas>
 
+<script onmount>
+    canvasEl = document.getElementById("player-canvas") as HTMLCanvasElement | null;
+
+    if (!canvasEl) {
+        console.warn("[demo] 没找到 canvas，录制时 target: \"canvas\" 会失败");
+    }
+</script>
+
 <style>
     .bar {
         display: flex;
