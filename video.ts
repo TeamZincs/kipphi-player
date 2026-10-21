@@ -2,8 +2,29 @@ import { WebDemuxer } from "web-demuxer";
 
 let wasmPath: string | undefined;
 
-export function setWasmPath(p: string) {
-    wasmPath = p;
+/**
+ * 设置 web-demuxer 的 wasm 路径
+ *
+ * 相对路径会按**页面**（`document.baseURI`）解析成绝对地址。
+ * 必须这么做：wasm 是在 web-demuxer 自己的 worker 里加载的，
+ * 相对路径会按那个 worker 的地址（blob: 或 `/assets/xxx.js`）去解析 → 必然 404。
+ *
+ * ```ts
+ * setWasmPath("./web-demuxer.wasm");                  // 放在站点根目录（public/）
+ * setWasmPath("https://cdn.jsdelivr.net/npm/web-demuxer@4/dist/wasm-files/web-demuxer.wasm");
+ * ```
+ */
+export function setWasmPath(p: string | URL) {
+    wasmPath = p instanceof URL ? p.href : p;
+}
+
+/** 相对路径按页面地址补全成绝对地址（worker 里加载 wasm 只认绝对地址） */
+function absoluteWasmPath(path: string) {
+    try {
+        return new URL(path, document.baseURI).href;
+    } catch {
+        return path;
+    }
 }
 
 const US = 1e-6;
@@ -296,7 +317,9 @@ export class VideoRenderingSource {
         this.codec = options.codec ?? "";
         this.readySeconds = options.readySeconds ?? 10;
         this.onProgress = options.onProgress;
-        this.demuxer = new WebDemuxer({ wasmFilePath: wasmPath });
+        this.demuxer = new WebDemuxer({
+            wasmFilePath: wasmPath === undefined ? undefined : absoluteWasmPath(wasmPath)
+        });
     }
 
     static async from(source: File | string, options: VideoSourceOptions = {}) {

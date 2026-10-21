@@ -60,7 +60,12 @@ const player = await Player.create(canvas, audioProcessor, audio, background, re
     renderer: "auto",
 });
 
-setWasmPath(...); // web-demuxer所用的WASM文件，如果不需要BGA功能无需设置。
+// web-demuxer 的 WASM，不需要 BGA 就不用设。
+// 相对路径会按页面地址（document.baseURI）补成绝对地址 —— 它是在 web-demuxer
+// 自己的 worker 里加载的，相对路径会按那个 worker 的地址解析，必然 404。
+// 所以文件要放在站点根目录（vite 的话就是 public/web-demuxer.wasm），
+// 或者直接给 CDN 的绝对地址。
+setWasmPath("./web-demuxer.wasm");
 
 // 贴图 / 视频 / 着色器都由适配器提供，三个方法都是可选的
 player.use({
