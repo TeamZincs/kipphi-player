@@ -383,6 +383,69 @@ function effectProgress(effect: EffectStartNode, beats: number): number {
     return Math.min(1, Math.max(0, (beats - startBeats) / (endBeats - startBeats)));
 }
 
+/** 一个非 global 特效在 Z 轴上的作用范围 */
+interface EffectWindow {
+    from: number;
+    to: number;
+    /** 相交但不包含时是否「吞掉」交集 */
+    exclusive: boolean;
+    chain: EffectRequest[];
+    /** 声明顺序：平局时后写的赢 */
+    order: number;
+}
+
+/**
+ * 挑出负责 `[from, to)` 这一段的特效。
+ *
+ * 同一段只能有一个特效（一个对象不能被两个着色器同时处理）：
+ * - 区间互相包含 → 取更窄的（内层自己处理，外层负责剩下的部分）
+ * - 只是相交、谁都不包含谁 → `exclusive` 的那个吞掉交集，否则取后声明的
+ */
+function pickWindow(windows: EffectWindow[], from: number, to: number): EffectWindow | null {
+    const candidates = windows.filter(window => window.from <= from && window.to >= to);
+    if (candidates.length === 0) return null;
+    if (candidates.length === 1) return candidates[0]!;
+
+    const swallowing = candidates.filter(window =>
+        window.exclusive
+        && candidates.some(other => other !== window && !(other.from >= window.from && other.to <= window.to)));
+    if (swallowing.length > 0) {
+        return swallowing.reduce((a, b) => (b.order > a.order ? b : a));
+    }
+    return candidates.reduce((a, b) => {
+        const widthA = a.to - a.from;
+        const widthB = b.to - b.from;
+        if (widthB !== widthA) return widthB < widthA ? b : a;
+        return b.order > a.order ? b : a;
+    });
+}
+
+/**
+ * 把 `[GPU_Z_BASE, GPU_Z_OVERLAY)` 按各特效的范围切成互不重叠的小段，
+ * 每段带上负责它的特效（没有则为 `null`）。
+ */
+function splitZ(windows: EffectWindow[]): { from: number; to: number; window: EffectWindow | null }[] {
+    const boundaries = new Set<number>([GPU_Z_BASE, GPU_Z_OVERLAY]);
+    for (const window of windows) {
+        if (window.from > GPU_Z_BASE && window.from < GPU_Z_OVERLAY) boundaries.add(window.from);
+        if (window.to > GPU_Z_BASE && window.to < GPU_Z_OVERLAY) boundaries.add(window.to);
+    }
+    const sorted = [...boundaries].sort((a, b) => a - b);
+    const segments: { from: number; to: number; window: EffectWindow | null }[] = [];
+    for (let i = 0; i < sorted.length - 1; i++) {
+        const from = sorted[i]!;
+        const to = sorted[i + 1]!;
+        if (!(to > from)) continue;
+        segments.push({ from, to, window: pickWindow(windows, from, to) });
+    }
+    return segments;
+}
+
+/** 两条链是不是同一串请求（按对象身份比，够用且便宜） */
+function sameChain(a: readonly EffectRequest[], b: readonly EffectRequest[]) {
+    return a.length === b.length && a.every((item, i) => item === b[i]);
+}
+
 /** `blur` 展开成水平 + 垂直两趟（我们的特效链天然支持） */
 const EFFECT_CHAINS: Record<string, (uniforms: EffectUniforms) => EffectRequest[]> = {
     // radius 缺省值写在这两个着色器自己的 `// %0.01%` 里
@@ -1774,10 +1837,17 @@ export class Player extends EventTarget {
     /**
      * 把谱面的 Phira 特效应用到这个帧上。
      *
-     * - 非 global 的特效只作用于谱面图层 `[0, GPU_Z_UI)`，
-     *   谱面自己的 UI（combo、进度条、曲名…）不受影响；
-     * - global 的特效作用于 `[0, GPU_Z_OVERLAY)`，即谱面 + 谱面 UI，
-     *   但**永远不含**只放帧率/时间的覆盖层。
+     * 每个特效的作用范围（Z 轴）：
+     *
+     * - `global: true` → `[0, GPU_Z_OVERLAY)`，即谱面 + 谱面 UI，
+     *   但**永远不含**只放帧率/时间的覆盖层；此时 `targetRange` 无效；
+     * - 带 `targetRange`（PhiZone Player 的扩展）→ `[minZIndex, maxZIndex)`，
+     *   并夹到 `[0, GPU_Z_UI)`，不会伸进覆盖层；
+     * - 都没有 → `[0, GPU_Z_UI)`，谱面自己的 UI 不受影响。
+     *
+     * 同一时刻可能有多个特效的范围交叠，这里把 Z 轴切成互不重叠的小段，
+     * 每段只跑一条链（一个对象不会被两个着色器同时处理）；global 链追加在每段末尾，
+     * 相当于最后再整屏过一遍。
      *
      * 每帧调用一次即可（内部会先清掉上一帧的设置）。
      */
@@ -1791,18 +1861,32 @@ export class Player extends EventTarget {
         const effects = this.chart.getActiveEffects(beats);
         if (effects.length === 0) return;
 
-        const chartChain: EffectRequest[] = [];
+        const windows: EffectWindow[] = [];
         const globalChain: EffectRequest[] = [];
         const missing: string[] = [];
 
-        for (const effect of effects) {
+        for (let i = 0; i < effects.length; i++) {
+            const effect = effects[i]!;
             // 谱面自己写了 progress 就以谱面为准（spread 在后面覆盖），没写才用按区间算的
             const uniforms = { progress: effectProgress(effect, beats), ...effect.evalVars(beats) };
             const chain = EFFECT_CHAINS[effect.value]?.(uniforms) ?? [{ shader: effect.value, uniforms }];
             for (const request of chain) {
                 if (!gpu.getShader(request.shader) && !missing.includes(request.shader)) missing.push(request.shader);
             }
-            (effect.global ? globalChain : chartChain).push(...chain);
+
+            if (effect.global) {
+                globalChain.push(...chain);
+                continue;
+            }
+
+            // 没写 targetRange 就是「整个谱面」，不碰谱面 UI；
+            // 写了的按谱面的来，但仍然不允许伸进只放帧率/时间的覆盖层
+            const range = effect.targetRange;
+            const from = Math.max(GPU_Z_BASE, range ? range.minZIndex : GPU_Z_BASE);
+            const to = Math.min(range ? GPU_Z_OVERLAY : GPU_Z_UI, range ? range.maxZIndex : GPU_Z_UI);
+            // 整段都在覆盖层上就直接忽略
+            if (!(to > from)) continue;
+            windows.push({ from, to, exclusive: range?.exclusive === true, chain, order: i });
         }
 
         for (const name of missing) {
@@ -1813,12 +1897,20 @@ export class Player extends EventTarget {
                 + "（自定义着色器请通过 receive() 的 shaderFetcher 或 addEffectShader() 注册）");
         }
 
-        if (globalChain.length > 0) {
-            // global 覆盖谱面 + 谱面 UI（到 GPU_Z_OVERLAY 为止），但不碰帧率/时间层；
-            // 非 global 的排在它前面，相当于「先把谱面处理一遍，再连 UI 一起处理一遍」
-            gpu.setEffect(GPU_Z_BASE, GPU_Z_OVERLAY, [...chartChain, ...globalChain]);
-        } else if (chartChain.length > 0) {
-            gpu.setEffect(GPU_Z_BASE, GPU_Z_UI, chartChain);
+        // 相邻且链相同的段合并，少开几趟 pass
+        const applied: { from: number; to: number; chain: EffectRequest[] }[] = [];
+        for (const segment of splitZ(windows)) {
+            const chain = segment.window ? [...segment.window.chain, ...globalChain] : globalChain;
+            if (chain.length === 0) continue;
+            const last = applied[applied.length - 1];
+            if (last && last.to === segment.from && sameChain(last.chain, chain)) {
+                last.to = segment.to;
+            } else {
+                applied.push({ from: segment.from, to: segment.to, chain });
+            }
+        }
+        for (const range of applied) {
+            gpu.setEffect(range.from, range.to, range.chain);
         }
     }
 

@@ -190,6 +190,27 @@ gpu.setEffect(0, 9, [{ shader: "invert", uniforms: { factor: 1 } }]);   // 只�
 - `global: false`（默认）：只作用于谱面图层 `[0, 9)`，谱面 UI 和覆盖层都不受影响
 - `global: true`：作用于 `[0, 10)`，即谱面 + 谱面 UI，但**永远不含**只放帧率/时间的覆盖层
 
+### 作用范围（PhiZone 的 `targetRange`）
+
+支持 [PhiZone Player](https://github.com/PhiZone/Player) 的扩展字段，让一个特效只作用于某一段 z：
+
+```json
+"targetRange": { "minZIndex": 3, "maxZIndex": 4, "exclusive": false }
+```
+
+- `minZIndex` 含、`maxZIndex` 不含；`global: true` 时该字段**无效**
+- 会被夹到 `[0, 10)`，所以像 `{ "minZIndex": 8, "maxZIndex": 16 }` 这种可以盖到谱面 UI，但**永远碰不到**只放帧率/时间的覆盖层（z=10）
+- 同一时刻多个特效的范围交叠时，把 z 轴切成互不重叠的小段，**每段只跑一条链**（一个对象不会被两个着色器同时处理）：
+
+| 情形 | 谁负责 |
+| --- | --- |
+| 互相包含 | 更窄的那个（内层单独处理，外层负责剩下的部分） |
+| 相交但互不包含，其中一方 `exclusive: true` | 带 `exclusive` 的那个「吞掉」交集 |
+| 相交但互不包含，都没有 `exclusive` | 取后声明的 |
+| 相邻不重叠 | 各管各的，同一段链相同会自动合并 |
+
+`global` 链恒定追加在每段链的最后，相当于最后再整屏过一遍。
+
 内置着色器：
 
 | 名字 | 参数（默认值） | 说明 |
