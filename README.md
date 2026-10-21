@@ -207,7 +207,8 @@ const operations = new Op.OperationList(chart);
 player.watch(operations);
 ```
 
-- 监听 `do` / `undo` / `redo`，停手 150ms 后重新对齐一次（`player.resourceSyncDelay` 可调），拖拽时不会每帧重扫
+- 监听 `do` / `undo` / `redo`，停手 150ms 后重新对齐一次（`player.resourceSyncDelay` 可调）
+- 对齐本身很便宜：扫描就是遍历判定线 / 视频序列 / effects，已经是资源的直接跳过，只有真新增了引用才会去问适配器。防抖只是把连续操作并成一次，避免同一类资源被并发请求
 - 只补缺的，不做卸载；`player.unwatch()` 取消监听，`player.destroy()` 也会自动取消
 - 想立刻对齐可以手动 `await player.syncResources()`
 
