@@ -167,21 +167,25 @@ export class DemoSession {
         return { player, audio: audioFile.buffer.slice(0), duration: chart.duration };
     }
 
-    /** 录一段，`limit` 是秒数或 "all" */
+    /**
+     * 录一段
+     *
+     * `range` 是秒数区间 `[起, 止)`；止为 `null` 或超出时长就到结尾。
+     * `renderer` 不给就跟着主播放器来（想强制 WebGL 1 就传 `"webgl1"`）。
+     */
     async record(
         pack: LoadedPack,
         target: "canvas" | "offscreen",
-        limit: string,
+        range: [number, number | null],
         onProgress: (frame: number, total: number) => void,
+        renderer?: RendererPreference,
     ): Promise<RecordResult> {
-        const end = limit === "all" ? pack.duration : Math.min(pack.duration, Number(limit));
+        const end = range[1] === null ? pack.duration : Math.min(pack.duration, range[1]);
         return await recordPlayer(pack.player, {
             target,
             fps: 60,
-            range: [0, end],
-            // 离屏那份播放器尽量用和主播放器一样的后端
-            renderer: pack.player.rendererName === "WebGPU" ? "webgpu"
-                : pack.player.rendererName === "WebGL 1" ? "webgl1" : "canvas2d",
+            range: [range[0], end],
+            renderer,
             audio: { source: pack.audio },
             onProgress,
         });

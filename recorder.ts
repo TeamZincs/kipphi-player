@@ -101,6 +101,14 @@ const DEFAULT_AUDIO_BITRATE = 128_000;
 /** 同时排队的帧数上限，超过就等编码器消化 */
 const MAX_ENCODE_QUEUE = 8;
 const AUDIO_CHUNK_FRAMES = 1024;
+/**
+ * 每隔多久主动把控制权交还浏览器（毫秒）
+ *
+ * 刷新调用只改 DOM，真正画到屏幕上还得等这个任务跑完。渲染循环里如果只有
+ * 背压等待，编码器跟得上的话根本进不去那里，进度条就一直不动、最后跳到 100%。
+ * 所以按 ~1 帧（16ms）的节奏主动让一次。
+ */
+const YIELD_INTERVAL_MS = 16;
 
 function tick() {
     return new Promise<void>(resolve => setTimeout(resolve, 0));
@@ -256,6 +264,9 @@ export async function recordPlayer(player: Player, options: RecordOptions = {}):
     const previousRenderingOffset = renderer.renderingOffset;
     renderer.renderingOffset = 0;
 
+    // 主动让出的节奏：~1 帧一次，够浏览器插一帧绘制
+    let lastYield = performance.now();
+
     try {
         for (let i = 0; i < totalFrames; i++) {
             if (options.signal?.aborted) {
@@ -276,10 +287,17 @@ export async function recordPlayer(player: Player, options: RecordOptions = {}):
             videoEncoder.encode(frame, { keyFrame: i % (fps * 2) === 0 });
             frame.close();
 
-            // 唯一需要等的地方：编码器排队太长就让它先消化
+            // 编码器排队太长就让它先消化
             while (videoEncoder.encodeQueueSize > MAX_ENCODE_QUEUE) {
                 await tick();
                 if (encodeError) throw encodeError;
+            }
+
+            // 主动让一次，浏览器才会把进度条画出来。
+            // 不能只靠上面的背压等待——编码器跟得上的时候那里根本不会进来。
+            if (performance.now() - lastYield >= YIELD_INTERVAL_MS) {
+                await tick();
+                lastYield = performance.now();
             }
 
             if (options.onProgress && (i % 5 === 0 || i === totalFrames - 1)) {

@@ -1,5 +1,11 @@
 <script>
-    import { downloadResult, getSession, type DemoSession, type LoadedPack } from "../../session";
+    import {
+        downloadResult,
+        getSession,
+        type DemoSession,
+        type LoadedPack,
+    } from "../../session";
+    import type { RendererPreference } from "../..";
 
     let session: DemoSession | null = null;
     let pack: LoadedPack | null = null;
@@ -10,7 +16,9 @@
     let hasPack = $state(false);
     let busy = $state(false);
     let status = $state("正在准备资源…");
-    let limit = $state("30");
+    /** 秒；结束留空表示到曲末 */
+    let startAt = $state("0");
+    let endAt = $state("");
 
     let logs: string[] = $state([]);
     let progress = $state(0);
@@ -20,6 +28,25 @@
     let elapsed = $state(0);
 
     let startedAt = 0;
+    /** 时长预设；空 = 用下面自己填的范围 */
+    let limit = $state("30");
+
+    /** 拿 [起, 止) 的秒数区间；止为 null 表示到曲末 */
+    function recordRange(duration: number): [number, number | null] | null {
+        const from = Number(startAt);
+
+        if (limit === "all") {
+            return [from, null];
+        }
+
+        const to = endAt === "" ? Number(limit) : Number(endAt);
+
+        if (!(from >= 0) || !(to > from) || !(from < duration)) {
+            return null;
+        }
+
+        return [from, to];
+    }
 
     function log(message: string) {
         const now = new Date();
@@ -71,10 +98,10 @@
     }
 
     /**
-     * 录制进度。
+     * 录制进度
      *
-     * 必须是**顶层具名函数**：写在 `record()` 里的内联回调会被并进 `record` 那一次
-     * 刷新（函数返回时才跑），而录制是个长 await，进度条就会一直不动、最后跳到 100%。
+     * 保持**顶层具名函数**：它由 recorder 从另一个模块回调，写在 `record()` 内部的话
+     * 就归 `record` 那一次守卫管，得等 `record` 走到自己的 await / 返回才刷。
      */
     function onRecordProgress(frame: number, total: number) {
         frames = frame;
@@ -92,9 +119,16 @@
         }
     }
 
-    async function record(target: "canvas" | "offscreen") {
+    async function record(target: "canvas" | "offscreen", renderer?: RendererPreference) {
         const current = pack;
         if (!current || !session || busy) {
+            return;
+        }
+
+        const range = recordRange(current.duration);
+
+        if (range === null) {
+            status = "时间范围不对（要 0 ≤ 起 < 止，且起 < 曲长）";
             return;
         }
 
@@ -106,10 +140,10 @@
         elapsed = 0;
         status = "准备中…";
         startedAt = performance.now();
-        log(`开始录制（${target}）`);
+        log(`开始录制（${target}${renderer ? ` / ${renderer}` : ""}）`);
 
         try {
-            const result = await session.record(current, target, limit, onRecordProgress);
+            const result = await session.record(current, target, range, onRecordProgress, renderer);
 
             const seconds = ((performance.now() - startedAt) / 1000).toFixed(1);
             const megabytes = (result.blob.size / 1024 / 1024).toFixed(1);
@@ -133,7 +167,7 @@
     <input type="file" accept=".zip" onchange={pick} disabled={!ready || busy} />
 
     <label>
-        时长
+        预设
         <select bind:value={limit} disabled={busy}>
             <option value="10">前 10 秒</option>
             <option value="30">前 30 秒</option>
@@ -141,8 +175,19 @@
         </select>
     </label>
 
-    <button onclick={() => void record("canvas")} disabled={!hasPack || busy}>录制（主线程渲染）</button>
-    <button onclick={() => void record("offscreen")} disabled={!hasPack || busy}>录制（离屏渲染）</button>
+    <label>
+        起
+        <input class="num" type="number" min="0" step="0.1" bind:value={startAt} disabled={busy} />
+    </label>
+
+    <label>
+        止
+        <input class="num" type="number" min="0" step="0.1" placeholder="留空 = 曲末" bind:value={endAt} disabled={busy} />
+    </label>
+
+    <button onclick={() => void record("canvas")} disabled={!hasPack || busy}>录制（可见画布）</button>
+    <button onclick={() => void record("offscreen")} disabled={!hasPack || busy}>后台录制</button>
+    <button onclick={() => void record("offscreen", "webgl1")} disabled={!hasPack || busy}>后台录制（强制 WebGL 1）</button>
 </section>
 
 <main class="panel">
@@ -155,6 +200,8 @@
         <div><dt>速度</dt><dd>{speed.toFixed(1)} fps</dd></div>
         <div><dt>已用</dt><dd>{elapsed.toFixed(1)} s</dd></div>
     </dl>
+
+    <p class="hint">带特效的谱请用「强制 WebGL 1」——特效只在 GPU 后端跑，WebGPU 那套还没跟上。</p>
 
     {#if logs.length > 0}
         <ol class="logs">
@@ -233,6 +280,16 @@
     .stats dd {
         font-variant-numeric: tabular-nums;
         margin: 0;
+    }
+
+    .num {
+        width: 5rem;
+    }
+
+    .hint {
+        color: #a86;
+        font-size: 0.85rem;
+        margin: 0 0 1rem;
     }
 
     .logs {
