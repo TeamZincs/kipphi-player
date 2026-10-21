@@ -222,6 +222,10 @@ gpu.setEffect(0, 9, [{ shader: "invert", uniforms: { factor: 1 } }]);   // 只�
 | `pixel` | `size` (10.0) | 像素化，`size` 是像素块边长（屏幕像素） |
 | `shockwave` | `progress` (0.2)、`centerX`/`centerY` (0.5)、`width` (0.1)、`distortion` (0.8)、`expand` (10.0) | 冲击波，`progress` 从 0 推到 1 播一次 |
 | `vignette` | `color` (黑)、`extend` (0.25)、`radius` (15.0) | 暗角，边缘向 `color` 渐变 |
+| `fisheye` | `power` (-0.1) | 鱼眼，`power` 为负时是「隧洞」那种往里吸的效果 |
+| `glitch` | `power` (0.3)、`rate` (0.6)、`speed` (5.0)、`blockCount` (30.5)、`colorRate` (0.01) | 故障风：水平条带随机错位 + RGB 分离，`rate` 控制闪烁概率 |
+| `noise` | `seed` (81.0)、`power` (0.03) | 噪点模糊，连续改 `seed` 图案也连续变化 |
+| `radialBlur` | `centerX`/`centerY` (0.5)、`power` (0.01)、`sampleCount` (3) | 放射模糊，`sampleCount` 越高越连贯（越贵） |
 
 参数名与默认值对齐 Phira 文档。`progress` 是唯一一个会兜底的：谱面自己写了就按谱面的，没写时按特效的 `[start, end]` 自动算 0→1。
 

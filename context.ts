@@ -103,6 +103,13 @@ export interface EffectShader {
     glsl?: string;
     /** WebGPU 用的片元主体（WGSL，返回值 vec4f），变量名与 GLSL 版一致 */
     wgsl?: string;
+    /**
+     * WGSL 的模块级前导代码（辅助函数等）
+     *
+     * `wgsl` 主体会被塞进 `fn fs(...) {}` 里，所以函数声明不能写在里面，
+     * 需要的话放这里。
+     */
+    wgslPrelude?: string;
 }
 
 /** 一个 z 区间上依次应用的特效链。区间是**左闭右开**的 `[from, to)` */
@@ -1132,9 +1139,10 @@ function buildWGSLUniformLayout(user: { name: string; components: 1 | 2 | 4 }[])
 }
 
 /** 把用户的 WGSL 片元主体包进完整模块，并注入 Phira 约定的内置变量 */
-function wrapWGSL(body: string, fields: string[]): string {
+function wrapWGSL(body: string, fields: string[], prelude = ""): string {
     const aliases = fields.slice(2).map(field => `    let ${field.split(":")[0]!.trim()} = u.${field.split(":")[0]!.trim()};`).join("\n");
     return `
+${prelude}
 struct EffectUniforms {
     ${fields.join(",\n    ")},
 };
@@ -1453,7 +1461,7 @@ class WebGPUBackend implements RenderBackend {
         const names = Object.keys(layout);
         const { fields, offsets, size } = buildWGSLUniformLayout(names.map(name => ({ name, components: layout[name]! })));
 
-        const module = this.device.createShaderModule({ code: wrapWGSL(shader.wgsl, fields) });
+        const module = this.device.createShaderModule({ code: wrapWGSL(shader.wgsl, fields, shader.wgslPrelude) });
         const pipeline = this.device.createRenderPipeline({
             layout: "auto",
             vertex: { module, entryPoint: "vs" },

@@ -365,6 +365,147 @@ export const BUILTIN_EFFECT_SHADERS: EffectShader[] = [
         return textureSample(screenTexture, samp, in.uv - dir * amount);
         `,
     },
+    {
+        // 鱼眼：以屏幕中心为原点做径向缩放，power 为负时是「隧道」那种往里吸的效果
+        // （Phira: fisheye / power -0.1）
+        name: "fisheye",
+        glsl: `
+        uniform float power; // %-0.1%
+
+        void main() {
+            vec2 dir = uv - 0.5;
+            float r = length(dir) * 2.0;          // 0 中心，1 边缘
+            float scale = 1.0 - power * r * r;
+            gl_FragColor = texture2D(screenTexture, vec2(0.5) + dir * scale);
+        }
+        `,
+        wgsl: `
+        let dir = in.uv - vec2f(0.5, 0.5);
+        let r = length(dir) * 2.0;
+        let scale = 1.0 - power * r * r;
+        return textureSample(screenTexture, samp, vec2f(0.5, 0.5) + dir * scale);
+        `,
+    },
+    {
+        // 故障：按水平条带随机错位 + RGB 分离，rate 控制「这一帧是否闪烁」
+        // （Phira: glitch / power 0.3、rate 0.6、speed 5.0、blockCount 30.5、colorRate 0.01）
+        name: "glitch",
+        glsl: `
+        uniform float power;      // %0.3%
+        uniform float rate;       // %0.6%
+        uniform float speed;      // %5.0%
+        uniform float blockCount; // %30.5%
+        uniform float colorRate;  // %0.01%
+
+        float rand(vec2 p) {
+            return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+        }
+
+        void main() {
+            // 把时间切成 speed 帧/s 的格子：同一格内图案不变，跨格才重新掷骰子
+            float t = floor(time * speed);
+            float on = step(1.0 - rate, rand(vec2(t, 7.0)));
+            float block = floor(uv.y * blockCount);
+            float shift = (rand(vec2(block, t)) - 0.5) * power * 0.2 * on;
+            vec2 sampleUv = vec2(uv.x + shift, uv.y);
+
+            float d = colorRate * 0.1 * on;
+            float r = texture2D(screenTexture, sampleUv + vec2(d, 0.0)).r;
+            float g = texture2D(screenTexture, sampleUv).g;
+            float b = texture2D(screenTexture, sampleUv - vec2(d, 0.0)).b;
+            float a = texture2D(screenTexture, sampleUv).a;
+            gl_FragColor = vec4(r, g, b, a);
+        }
+        `,
+        wgslPrelude: `
+fn rand(p: vec2f) -> f32 {
+    return fract(sin(dot(p, vec2f(12.9898, 78.233))) * 43758.5453);
+}
+        `,
+        wgsl: `
+        let t = floor(time * speed);
+        let on = step(1.0 - rate, rand(vec2f(t, 7.0)));
+        let block = floor(in.uv.y * blockCount);
+        let shift = (rand(vec2f(block, t)) - 0.5) * power * 0.2 * on;
+        let sampleUv = vec2f(in.uv.x + shift, in.uv.y);
+
+        let d = colorRate * 0.1 * on;
+        let r = textureSample(screenTexture, samp, sampleUv + vec2f(d, 0.0)).r;
+        let g = textureSample(screenTexture, samp, sampleUv).g;
+        let b = textureSample(screenTexture, samp, sampleUv - vec2f(d, 0.0)).b;
+        let a = textureSample(screenTexture, samp, sampleUv).a;
+        return vec4f(r, g, b, a);
+        `,
+    },
+    {
+        // 噪点：按 uv + seed 生成平滑的伪随机偏移，seed 连续变化时图案也连续变化
+        // （Phira: noise / seed 81.0、power 0.03）
+        name: "noise",
+        glsl: `
+        uniform float seed;  // %81.0%
+        uniform float power; // %0.03%
+
+        vec2 noiseOffset(vec2 p, float s) {
+            return vec2(
+                sin(p.x * 97.0 + s) + sin(p.y * 133.0 - s * 1.3) + sin((p.x + p.y) * 61.0 + s * 0.7),
+                cos(p.y * 89.0 - s * 1.1) + cos(p.x * 151.0 + s) + cos((p.x - p.y) * 73.0 - s * 0.9)
+            ) / 3.0;
+        }
+
+        void main() {
+            gl_FragColor = texture2D(screenTexture, uv + noiseOffset(uv, seed) * power);
+        }
+        `,
+        wgslPrelude: `
+fn noiseOffset(p: vec2f, s: f32) -> vec2f {
+    return vec2f(
+        sin(p.x * 97.0 + s) + sin(p.y * 133.0 - s * 1.3) + sin((p.x + p.y) * 61.0 + s * 0.7),
+        cos(p.y * 89.0 - s * 1.1) + cos(p.x * 151.0 + s) + cos((p.x - p.y) * 73.0 - s * 0.9)
+    ) / 3.0;
+}
+        `,
+        wgsl: `
+        return textureSample(screenTexture, samp, in.uv + noiseOffset(in.uv, seed) * power);
+        `,
+    },
+    {
+        // 放射模糊：从这个中心往外拉，sampleCount 越高越连贯（也越贵）
+        // （Phira: radialBlur / centerX 0.5、centerY 0.5、power 0.01、sampleCount 3）
+        name: "radialBlur",
+        glsl: `
+        uniform float centerX;     // %0.5%
+        uniform float centerY;     // %0.5%
+        uniform float power;       // %0.01%
+        uniform float sampleCount; // %3%
+
+        void main() {
+            vec2 center = vec2(centerX, centerY);
+            vec2 dir = uv - center;
+            int count = int(clamp(sampleCount, 1.0, 64.0));
+            float last = float(max(count, 2) - 1);
+            vec4 sum = vec4(0.0);
+            for (int i = 0; i < 64; i++) {
+                if (i >= count) break;
+                float t = float(i) / last;
+                sum += texture2D(screenTexture, center + dir * (1.0 + power * t));
+            }
+            gl_FragColor = sum / float(count);
+        }
+        `,
+        wgsl: `
+        let center = vec2f(centerX, centerY);
+        let dir = in.uv - center;
+        let count = i32(clamp(sampleCount, 1.0, 64.0));
+        let last = f32(max(count, 2) - 1);
+        var sum = vec4f(0.0, 0.0, 0.0, 0.0);
+        for (var i = 0; i < 64; i++) {
+            if (i >= count) { break; }
+            let t = f32(i) / last;
+            sum += textureSample(screenTexture, samp, center + dir * (1.0 + power * t));
+        }
+        return sum / f32(count);
+        `,
+    },
 ];
 
 /**
