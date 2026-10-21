@@ -295,6 +295,8 @@ export async function recordPlayer(player: Player, options: RecordOptions = {}):
                 source: audioOptions.source,
             });
             if (mixed) {
+                console.info(`[recorder] 混音完成：BGM + ${capturedSounds.length} 个打击音`
+                    + `（offset=${chart.offset}ms, baseOffset=${renderer.baseOffset}s）`);
                 const audioEncoder = new AudioEncoder({
                     output: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
                     error: error => { encodeError = error; },
@@ -436,18 +438,18 @@ async function mixAudio(
         gain.gain.value = options.hitSoundGain;
         gain.connect(context.destination);
 
-        // 拍数 → 音频时间轴（秒）
+        // 拍数 → 歌曲时间轴（秒），和实时播放时 `playSounds()` 用的钟完全一致：
         //
-        //   renderingTime = audioTime - offset/1000 + baseOffset + renderingOffset * rate
+        //   time = audioTime - offset/1000 + baseOffset
+        //   playSounds 在 time 越过音符拍数时发声
         //
-        // 谱面里的 note 是画在渲染时间轴上的，直接拿 renderingTime 当音频时间去排，
-        // 会整整差一个 (renderingOffset - offset/1000 + baseOffset)。
-        const playbackRate = player.audio.playbackRate || 1;
+        // 所以音符在音频里的位置是 toSeconds(beats) + offset/1000 - baseOffset。
+        // 注意这里**不能**再减 renderingOffset ——
+        // 那是画面上用来补偿显示延迟的偏移，`playSounds()` 从来不看它。
         const toAudioTime = (beats: number) =>
             player.chart!.timeCalculator.toSeconds(beats)
             + player.chart!.offset / 1000
-            - player.baseOffset
-            - player.renderingOffset * playbackRate;
+            - player.baseOffset;
 
         for (const event of soundEvents) {
             const buffer = player.audioProcessor.getNoteSound(event.type);
