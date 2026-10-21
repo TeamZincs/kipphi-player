@@ -3,6 +3,7 @@
 
     let session: DemoSession | null = null;
     let pack: LoadedPack | null = null;
+    /** 这一页不展示画面：播放器画在一块藏起来的 canvas 上 */
     let canvasEl: HTMLCanvasElement | null = null;
 
     let ready = $state(false);
@@ -11,13 +12,38 @@
     let status = $state("正在准备资源…");
     let limit = $state("30");
 
+    let logs: string[] = $state([]);
+    let progress = $state(0);
+    let frames = $state(0);
+    let totalFrames = $state(0);
+    let speed = $state(0);
+    let elapsed = $state(0);
+
+    let startedAt = 0;
+
+    function log(message: string) {
+        const now = new Date();
+        const stamp = [now.getHours(), now.getMinutes(), now.getSeconds()]
+            .map(part => String(part).padStart(2, "0"))
+            .join(":");
+
+        logs.push(`${stamp}  ${message}`);
+
+        // 别让日志无限长
+        if (logs.length > 200) {
+            logs.splice(0, logs.length - 200);
+        }
+    }
+
     getSession().then(created => {
         session = created;
         ready = true;
         status = "选一个谱面压缩包";
+        log("资源就绪（图片 / 字体 / 资源包 / 打击音）");
     }).catch(error => {
         console.error(error);
         status = `初始化失败：${(error as Error).message}`;
+        log(`初始化失败：${(error as Error).message}`);
     });
 
     async function pick(event: Event) {
@@ -29,13 +55,16 @@
 
         busy = true;
         status = "正在解压…";
+        log(`载入 ${file.name}`);
         try {
             pack = await session.load(canvasEl, file);
             hasPack = true;
             status = "选个时长，然后录";
+            log(`谱面就绪：${pack.duration.toFixed(1)}s，后端 ${pack.player.rendererName}`);
         } catch (error) {
             console.error(error);
             status = `加载失败：${(error as Error).message}`;
+            log(`加载失败：${(error as Error).message}`);
         } finally {
             busy = false;
         }
@@ -48,23 +77,43 @@
         }
 
         busy = true;
+        progress = 0;
+        frames = 0;
+        totalFrames = 0;
+        speed = 0;
+        elapsed = 0;
         status = "准备中…";
-        const started = performance.now();
+        startedAt = performance.now();
+        log(`开始录制（${target}）`);
 
         try {
             const result = await session.record(current, target, limit, (frame, total) => {
-                status = `录制中 ${((frame / total) * 100).toFixed(1)}%（${frame}/${total} 帧）`;
+                frames = frame;
+                totalFrames = total;
+                progress = total > 0 ? frame / total : 0;
+
+                const seconds = (performance.now() - startedAt) / 1000;
+
+                elapsed = seconds;
+                speed = seconds > 0 ? frame / seconds : 0;
+                status = `录制中 ${(progress * 100).toFixed(1)}%`;
+
+                if (frame === total || frame % 300 === 0) {
+                    log(`${(progress * 100).toFixed(0)}%  ${frame}/${total} 帧  ${speed.toFixed(1)} fps`);
+                }
             });
 
-            const seconds = ((performance.now() - started) / 1000).toFixed(1);
+            const seconds = ((performance.now() - startedAt) / 1000).toFixed(1);
             const megabytes = (result.blob.size / 1024 / 1024).toFixed(1);
             status = `${result.container.toUpperCase()} / ${result.videoCodec}`
                 + `${result.audioCodec ? " + " + result.audioCodec : "（无音频）"}`
                 + `，${megabytes} MB，耗时 ${seconds}s`;
+            log(`完成：${status}`);
             downloadResult(result, `kipphi-${target}`);
         } catch (error) {
             console.error(error);
             status = `录制失败：${(error as Error).message}`;
+            log(`录制失败：${(error as Error).message}`);
         } finally {
             busy = false;
         }
@@ -84,20 +133,40 @@
         </select>
     </label>
 
-    <button onclick={() => void record("canvas")} disabled={!hasPack || busy}>录制（可见画布）</button>
-    <button onclick={() => void record("offscreen")} disabled={!hasPack || busy}>后台录制</button>
-
-    <span class="status">{status}</span>
+    <button onclick={() => void record("canvas")} disabled={!hasPack || busy}>录制（主线程渲染）</button>
+    <button onclick={() => void record("offscreen")} disabled={!hasPack || busy}>录制（离屏渲染）</button>
 </section>
 
-<canvas id="player-canvas" width="1600" height="900"></canvas>
+<main class="panel">
+    <p class="headline">{status}</p>
+
+    <div class="progress"><div class="fill" style="width: {(progress * 100).toFixed(1)}%"></div></div>
+
+    <dl class="stats">
+        <div><dt>帧</dt><dd>{frames} / {totalFrames}</dd></div>
+        <div><dt>速度</dt><dd>{speed.toFixed(1)} fps</dd></div>
+        <div><dt>已用</dt><dd>{elapsed.toFixed(1)} s</dd></div>
+    </dl>
+
+    {#if logs.length > 0}
+        <ol class="logs">
+            {#for line of logs}
+                <li>{line}</li>
+            {/for}
+        </ol>
+    {/if}
+</main>
 
 <script onmount>
-    canvasEl = document.getElementById("player-canvas") as HTMLCanvasElement | null;
+    // 画面藏到视口外：WebGL 照样渲染，只是用户看不见
+    const canvas = document.createElement("canvas");
 
-    if (!canvasEl) {
-        console.warn("[demo] 没找到 canvas，录制时 target: \"canvas\" 会失败");
-    }
+    canvas.width = 1600;
+    canvas.height = 900;
+    canvas.style.position = "fixed";
+    canvas.style.left = "-10000px";
+    document.body.appendChild(canvas);
+    canvasEl = canvas;
 </script>
 
 <style>
@@ -113,8 +182,62 @@
         padding: 0.25rem 0.6rem;
     }
 
-    .status {
-        color: #9aa;
+    .panel {
+        margin: 0 auto;
+        max-width: 46rem;
+        padding: 0 1rem 2rem;
+        font: 13px/1.6 system-ui, sans-serif;
+    }
+
+    .headline {
+        font-size: 1.05rem;
+        margin: 1rem 0 0.75rem;
+    }
+
+    .progress {
+        background: #222;
+        border-radius: 999px;
+        height: 8px;
+        overflow: hidden;
+    }
+
+    .fill {
+        background: #4c8;
+        height: 100%;
+    }
+
+    .stats {
+        display: flex;
+        gap: 2rem;
+        margin: 0.75rem 0 1.25rem;
+    }
+
+    .stats div {
+        display: flex;
+        flex-direction: column;
+    }
+
+    .stats dt {
+        color: #789;
+        font-size: 0.8rem;
+    }
+
+    .stats dd {
         font-variant-numeric: tabular-nums;
+        margin: 0;
+    }
+
+    .logs {
+        background: #161616;
+        border-radius: 6px;
+        color: #9ab;
+        font-family: ui-monospace, monospace;
+        font-size: 12px;
+        line-height: 1.7;
+        list-style: none;
+        margin: 0;
+        max-height: 18rem;
+        overflow: auto;
+        padding: 0.6rem 0.9rem;
     }
 </style>
