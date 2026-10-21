@@ -5,7 +5,7 @@
     "": {
       "name": "kpp",
       "dependencies": {
-        "kipphi": "3.0.0-alpha.3",
+        "kipphi": "3.0.0-alpha.4",
         "web-demuxer": "^4.0.0",
         "yaml": "^2.8.2",
       },
@@ -28,7 +28,7 @@
 
     "csstype": ["csstype@3.1.3", "https://registry.npmmirror.com/csstype/-/csstype-3.1.3.tgz", {}, "sha512-M1uQkMl8rQK/szD0LNhtqxIPLpimGm8sOBwU7lLnCpSbTyY3yeU1Vc7l4KT5zT4s/yOxHH5O7tIuuLOCnLADRw=="],
 
-    "kipphi": ["kipphi@3.0.0-alpha.3", "", {}, "sha512-XE0t9P4vrOCpBzLdX8dSBJ4f7xf7iVX8+LsKvlbpU4Mcx3u7DWl/Ye42RTGW/OerHLBJtIpenJTH8vVGGM5KNg=="],
+    "kipphi": ["kipphi@3.0.0-alpha.4", "", {}, "sha512-Se+lMOw79gbmjzRDLhHqPKBHAV+jRw0JcE6lfpb0xJWEgUbg+Nz968urcP/odPXSQbvDNLflNFf5B6HJo3cJ/w=="],
 
     "typescript": ["typescript@5.9.3", "https://registry.npmmirror.com/typescript/-/typescript-5.9.3.tgz", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
 

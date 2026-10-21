@@ -16,7 +16,7 @@ import {
     NNNodeLike,
     type TimeT,
     type EffectStartNode,
-    type Op,
+    Op,
     VideoScale
 } from "kipphi";
 /// #default
@@ -654,42 +654,64 @@ export interface ResourceAdapter {
 }
 } */
 
-/** 会让谱面新增资源引用的操作事件 */
-const RESOURCE_EVENTS = ["do", "undo", "redo"] as const;
-
 /**
  * 监听 `OperationList`，把编辑过程中新引用到的资源同步给播放器。
  *
- * 编辑器不需要自己盯着「刚才那个操作加了什么贴图 / 视频 / 着色器」，
- * 操作结束后（默认等 150ms，避免拖拽时每帧都重扫）重新对齐一次即可。
+ * 直接按住「会引入资源的操作类」：`onOperation` 会穿透复合操作、`UnionOperation`
+ * 和 `LazyOperation`，被 `rewrite` 合并掉的变更也会按 `do` 通知一次。
+ * 撤销时不需要做任何事——已经加载的资源不卸载。
  */
 class ResourceSyncWatcher {
-    private timer: ReturnType<typeof setTimeout> | null = null;
-    private readonly listener = () => this.schedule();
+    private readonly hooks: { klass: Op.OperationClass; listener: Op.OperationListener<Op.OperationClass> }[] = [];
 
     constructor(
         private readonly player: Player,
         private readonly operations: OperationList,
-        private readonly delay: number,
     ) { }
 
     attach() {
-        for (const type of RESOURCE_EVENTS) this.operations.addEventListener(type, this.listener);
+        // 判定线换纹理
+        this.hook(Op.JudgeLinePropChangeOperation, (operation, direction) => {
+            if (direction === "do" && operation.field === "texture") {
+                void this.player.loadTexture(operation.value as string);
+            }
+        });
+
+        // #default
+        // 新增特效 / 换着色器
+        this.hook(Op.EffectAddOperation, (operation, direction) => {
+            if (direction === "do") void this.player.loadShader(operation.effect.shader);
+        });
+        this.hook(Op.EffectPropChangeOperation, (operation, direction) => {
+            if (direction === "do" && operation.field === "shader") {
+                void this.player.loadShader(operation.value as string);
+            }
+        });
+        // #enddefault
+
+        // 视频通道换片：插入一段新值，或改某一段的值
+        const isVideoName = (sequence: unknown) => sequence !== undefined && sequence === this.player.chart?.video.name;
+        this.hook(Op.EventNodePairInsertOperation, (operation, direction) => {
+            if (direction === "do" && isVideoName(operation.sequence)) {
+                // 插入操作的 `value` 不会同步，值在节点上
+                void this.player.loadVideo(operation.node.value as unknown as string);
+            }
+        });
+        this.hook(Op.EventNodeValueChangeOperation, (operation, direction) => {
+            if (direction === "do" && isVideoName(operation.node?.parentSeq)) {
+                void this.player.loadVideo(operation.value as string);
+            }
+        });
     }
 
     detach() {
-        for (const type of RESOURCE_EVENTS) this.operations.removeEventListener(type, this.listener);
-        if (this.timer !== null) clearTimeout(this.timer);
-        this.timer = null;
+        for (const { klass, listener } of this.hooks) this.operations.offOperation(klass, listener);
+        this.hooks.length = 0;
     }
 
-    /** 合并同一批操作，只在停手之后扫一次 */
-    private schedule() {
-        if (this.timer !== null) return;
-        this.timer = setTimeout(() => {
-            this.timer = null;
-            void this.player.syncResources();
-        }, this.delay);
+    private hook<C extends Op.OperationClass>(klass: C, listener: Op.OperationListener<C>) {
+        this.operations.onOperation(klass, listener);
+        this.hooks.push({ klass, listener: listener as Op.OperationListener<Op.OperationClass> });
     }
 }
 
@@ -786,8 +808,6 @@ export class Player extends EventTarget {
     private adapter: ResourceAdapter | null = null;
     /** 编辑操作监听，由 {@linkcode watch} 设置 */
     private resourceWatcher: ResourceSyncWatcher | null = null;
-    /** 编辑停下多久之后重新对齐资源（毫秒） */
-    resourceSyncDelay = 150;
     private syncingResources = false;
     private syncPending = false;
     /** 已经提醒过的资源问题，同一个 key 只提一次 */
@@ -2195,15 +2215,19 @@ export class Player extends EventTarget {
     /**
      * 监听编辑器的操作列表，编辑过程中新引用到的资源会自动补齐。
      *
+     * 每次 `do` / `undo` / `redo` 后立刻对齐一次（扫描很便宜，已有的资源直接跳过），
+     * 连续操作由 {@linkcode syncResources} 自己合并。引用被删掉时不做任何处理——
+     * 已经加载的资源留着，不卸载。
+     *
      * 不接编辑器（纯播放器）就不用调。重复调用会换掉上一个监听。
      *
      * ```ts
      * player.watch(new Op.OperationList(chart));
      * ```
      */
-    watch(operations: OperationList, delay: number = this.resourceSyncDelay) {
+    watch(operations: OperationList) {
         this.resourceWatcher?.detach();
-        this.resourceWatcher = new ResourceSyncWatcher(this, operations, delay);
+        this.resourceWatcher = new ResourceSyncWatcher(this, operations);
         this.resourceWatcher.attach();
         return this;
     }
@@ -2235,19 +2259,14 @@ export class Player extends EventTarget {
     /**
      * 把谱面当前引用到的资源补齐（已经加载过的跳过）。
      *
-     * `receive()` 会调一次，之后由 {@linkcode watch} 在编辑操作后自动调。
+     * `receive()` 会调一次；编辑期由 {@linkcode watch} 按操作类型精准补，
+     * 这里留作兜底（比如批量操作、或宿主自己改了谱面结构）。
      * @internal
      */
     async syncResources() {
         const chart = this.chart;
         if (!chart) return;
-        const adapter = this.adapter;
-        if (!adapter) {
-            this.warnResourceOnce("no-adapter",
-                "[Player] 还没有设置资源适配器，贴图/视频/着色器都拿不到；"
-                + "请先 player.use({ texture, video, shader })");
-            return;
-        }
+        if (!this.adapter) return this.warnNoAdapter();
         if (this.syncingResources) {
             // 正在同步时又被叫了一次，等这一轮跑完再补一遍
             this.syncPending = true;
@@ -2255,30 +2274,10 @@ export class Player extends EventTarget {
         }
         this.syncingResources = true;
         try {
-            for (const name of chart.scanAllTextures()) {
-                if (name === "line.png" || this.textureMapping.has(name)) continue;
-                const texture = await this.fetchResource("texture", name, adapter.texture?.(name));
-                if (texture) this.textureMapping.set(name, texture);
-            }
-            for (const name of chart.scanAllVideos()) {
-                if (this.videoMapping.has(name)) continue;
-                const video = await this.fetchResource("video", name, adapter.video?.(name));
-                if (video) this.videoMapping.set(name, video);
-            }
+            for (const name of chart.scanAllTextures()) await this.loadTexture(name);
+            for (const name of chart.scanAllVideos()) await this.loadVideo(name);
             // #default
-            const gpu = this.gpu;
-            for (const path of chart.scanAllShaders()) {
-                if (!gpu || gpu.getShader(path)) continue;
-                const shader = await this.fetchResource("shader", path, adapter.shader?.(path));
-                if (!shader) continue;
-                // 注册名必须和谱面里的 effect.shader 完全一致，否则查不到
-                if (!shader.name) shader.name = path;
-                if (gpu.kind === "webgpu" && !shader.wgsl) {
-                    this.warnResourceOnce(`wgsl:${path}`, `[Player] ${path} 只有 GLSL 版本，WebGPU 后端下会被跳过`);
-                    continue;
-                }
-                gpu.addShader(shader);
-            }
+            for (const path of chart.scanAllShaders()) await this.loadShader(path);
             // #enddefault
         } finally {
             this.syncingResources = false;
@@ -2287,6 +2286,59 @@ export class Player extends EventTarget {
                 void this.syncResources();
             }
         }
+    }
+
+    /**
+     * 取一张贴图（已有则跳过）
+     * @internal
+     */
+    async loadTexture(name: string) {
+        // line.png 是播放器自带的默认线纹理，谱面包里没有这个文件
+        if (!name || name === "line.png" || this.textureMapping.has(name)) return;
+        const adapter = this.adapter;
+        if (!adapter) return this.warnNoAdapter();
+        const texture = await this.fetchResource("texture", name, adapter.texture?.(name));
+        if (texture) this.textureMapping.set(name, texture);
+    }
+
+    /**
+     * 取一段视频（已有则跳过）
+     * @internal
+     */
+    async loadVideo(name: string) {
+        if (!name || this.videoMapping.has(name)) return;
+        const adapter = this.adapter;
+        if (!adapter) return this.warnNoAdapter();
+        const video = await this.fetchResource("video", name, adapter.video?.(name));
+        if (video) this.videoMapping.set(name, video);
+    }
+
+    // #default
+    /**
+     * 取一个自定义特效着色器并注册（已有则跳过）
+     * @internal
+     */
+    async loadShader(path: string) {
+        const gpu = this.gpu;
+        if (!gpu || !path || gpu.getShader(path)) return;
+        const adapter = this.adapter;
+        if (!adapter) return this.warnNoAdapter();
+        const shader = await this.fetchResource("shader", path, adapter.shader?.(path));
+        if (!shader) return;
+        // 注册名必须和谱面里的 effect.shader 完全一致，否则查不到
+        if (!shader.name) shader.name = path;
+        if (gpu.kind === "webgpu" && !shader.wgsl) {
+            this.warnResourceOnce(`wgsl:${path}`, `[Player] ${path} 只有 GLSL 版本，WebGPU 后端下会被跳过`);
+            return;
+        }
+        gpu.addShader(shader);
+    }
+    // #enddefault
+
+    private warnNoAdapter() {
+        this.warnResourceOnce("no-adapter",
+            "[Player] 还没有设置资源适配器，贴图/视频/着色器都拿不到；"
+            + "请先 player.use({ texture, video, shader })");
     }
 
     /** 取一个资源；适配器没实现或失败都只 warn 一次，返回 null */

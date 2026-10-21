@@ -207,10 +207,11 @@ const operations = new Op.OperationList(chart);
 player.watch(operations);
 ```
 
-- 监听 `do` / `undo` / `redo`，停手 150ms 后重新对齐一次（`player.resourceSyncDelay` 可调）
-- 对齐本身很便宜：扫描就是遍历判定线 / 视频序列 / effects，已经是资源的直接跳过，只有真新增了引用才会去问适配器。防抖只是把连续操作并成一次，避免同一类资源被并发请求
-- 只补缺的，不做卸载；`player.unwatch()` 取消监听，`player.destroy()` 也会自动取消
-- 想立刻对齐可以手动 `await player.syncResources()`
+- 直接监听「会引入资源的操作类」（`OperationList.onOperation`，会穿透复合操作与 `UnionOperation` / `LazyOperation` 包装）：判定线换纹理、新增特效、改特效着色器、视频通道换片
+- 每次只向适配器要**那一个**新资源，已经有的直接跳过；撤销不做任何事（资源本来就没卸载）
+- 只补缺的，**不做卸载**——引用被删掉时已加载的资源留着不动
+- `player.unwatch()` 取消监听，`player.destroy()` 也会自动取消
+- 批量改完想整体对一遍，`await player.syncResources()`
 
 ## 特效（Phira Effects）
 
