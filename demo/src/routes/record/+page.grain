@@ -70,6 +70,28 @@
         }
     }
 
+    /**
+     * 录制进度。
+     *
+     * 必须是**顶层具名函数**：写在 `record()` 里的内联回调会被并进 `record` 那一次
+     * 刷新（函数返回时才跑），而录制是个长 await，进度条就会一直不动、最后跳到 100%。
+     */
+    function onRecordProgress(frame: number, total: number) {
+        frames = frame;
+        totalFrames = total;
+        progress = total > 0 ? frame / total : 0;
+
+        const seconds = (performance.now() - startedAt) / 1000;
+
+        elapsed = seconds;
+        speed = seconds > 0 ? frame / seconds : 0;
+        status = `录制中 ${(progress * 100).toFixed(1)}%`;
+
+        if (frame === total || frame % 300 === 0) {
+            log(`${(progress * 100).toFixed(0)}%  ${frame}/${total} 帧  ${speed.toFixed(1)} fps`);
+        }
+    }
+
     async function record(target: "canvas" | "offscreen") {
         const current = pack;
         if (!current || !session || busy) {
@@ -87,21 +109,7 @@
         log(`开始录制（${target}）`);
 
         try {
-            const result = await session.record(current, target, limit, (frame, total) => {
-                frames = frame;
-                totalFrames = total;
-                progress = total > 0 ? frame / total : 0;
-
-                const seconds = (performance.now() - startedAt) / 1000;
-
-                elapsed = seconds;
-                speed = seconds > 0 ? frame / seconds : 0;
-                status = `录制中 ${(progress * 100).toFixed(1)}%`;
-
-                if (frame === total || frame % 300 === 0) {
-                    log(`${(progress * 100).toFixed(0)}%  ${frame}/${total} 帧  ${speed.toFixed(1)} fps`);
-                }
-            });
+            const result = await session.record(current, target, limit, onRecordProgress);
 
             const seconds = ((performance.now() - startedAt) / 1000).toFixed(1);
             const megabytes = (result.blob.size / 1024 / 1024).toFixed(1);
