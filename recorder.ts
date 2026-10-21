@@ -3,7 +3,7 @@ import { Muxer as WebmMuxer, ArrayBufferTarget as WebmArrayBufferTarget } from "
 
 import type { NoteType } from "kipphi";
 
-import type { Player } from "./player";
+import type { Player, RendererPreference } from "./player";
 
 /** 容器格式 */
 export type RecordContainer = "mp4" | "webm";
@@ -47,6 +47,8 @@ export interface RecordOptions {
     range?: [number, number];
     /** 想用的容器；缺省按编码器支持情况在 mp4 / webm 里挑 */
     container?: RecordContainer;
+    /** 离屏播放器用的渲染后端，缺省 `auto`（尽量和主播放器一致就手动传） */
+    renderer?: RendererPreference;
     video?: RecordVideoOptions;
     /** 传 `false` 出无声视频 */
     audio?: false | RecordAudioOptions;
@@ -204,7 +206,7 @@ export async function recordPlayer(player: Player, options: RecordOptions = {}):
     let canvas: HTMLCanvasElement | OffscreenCanvas = player.canvas;
     let ownsRenderer = false;
     if (target === "offscreen") {
-        const offscreen = await createOffscreenPlayer(player, width, height);
+        const offscreen = await createOffscreenPlayer(player, width, height, options.renderer);
         renderer = offscreen.player;
         canvas = offscreen.canvas;
         ownsRenderer = true;
@@ -330,6 +332,9 @@ export async function recordPlayer(player: Player, options: RecordOptions = {}):
         } else if (wasPlaying) {
             // 录制前在播的话，录完接着播
             renderer.play();
+        } else {
+            // 录制期间临时置真的，这里要复原，不然 playSounds 会一直跑
+            renderer.playing = false;
         }
     }
 }
@@ -345,7 +350,12 @@ interface OffscreenRenderTarget {
  *
  * 原播放器没有 adapter 的话，离屏这份也拿不到谱面里的自定义着色器。
  */
-async function createOffscreenPlayer(player: Player, width: number, height: number): Promise<OffscreenRenderTarget> {
+async function createOffscreenPlayer(
+    player: Player,
+    width: number,
+    height: number,
+    renderer: RendererPreference = "auto",
+): Promise<OffscreenRenderTarget> {
     if (typeof OffscreenCanvas === "undefined") {
         throw new Error("[recorder] 当前环境不支持 OffscreenCanvas，只能录可见画布（target: \"canvas\"）");
     }
@@ -358,10 +368,21 @@ async function createOffscreenPlayer(player: Player, width: number, height: numb
         player.audio,
         player.background,
         player.respack,
-        { renderer: "auto" },
+        { renderer },
     );
     player.copyResourcesTo(offscreen);
     await offscreen.receive(player.chart!);
+
+    // 把和画面相关的可调项抄过去，保证录出来和肉眼看到的一致
+    offscreen.renderingOffset = player.renderingOffset;
+    offscreen.baseOffset = player.baseOffset;
+    offscreen.showsRenderingBaseline = player.showsRenderingBaseline;
+    offscreen.showsInfo = player.showsInfo;
+    offscreen.hitEffectNoFollows = player.hitEffectNoFollows;
+    offscreen.noteSize = player.noteSize;
+    offscreen.noteHeight = player.noteHeight;
+    offscreen.hitEffectSize = player.hitEffectSize;
+
     return { canvas, player: offscreen };
 }
 

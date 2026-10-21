@@ -1,4 +1,4 @@
-import { Player, AudioProcessor, Images, Respack, VideoFrameSource, setWasmPath, type RendererPreference } from "..";
+import { Player, AudioProcessor, Images, Respack, VideoFrameSource, recordPlayer, setWasmPath, type RendererPreference } from "..";
 import { Chart } from "kipphi";
 import { unzip } from "./unzip";
 
@@ -184,6 +184,12 @@ fileInput.addEventListener("change", async (e) => {
         },
     });
     await player.receive(chart);
+
+    // 录制要用：播放器本身、BGM 原始数据、时长
+    recordable = { player, audio: audioFile.buffer.slice(0), duration: chart.duration };
+    for (const button of recordButtons) button.disabled = false;
+    recordStatus.textContent = "";
+
     window.addEventListener("keydown", (e) => {
         if (e.key !== " ") {
             return;
@@ -195,3 +201,64 @@ fileInput.addEventListener("change", async (e) => {
         }
     });
 })
+
+/* ------------------------------ 录制 ------------------------------ */
+
+const recordRange = document.getElementById("recordRange") as HTMLSelectElement;
+const recordStatus = document.getElementById("recordStatus") as HTMLSpanElement;
+const recordButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-record]"));
+
+/** 当前加载好的谱面，录制时用 */
+let recordable: { player: Player; audio: ArrayBuffer; duration: number } | null = null;
+
+for (const button of recordButtons) {
+    button.addEventListener("click", () => {
+        void record(button.dataset.record as "canvas" | "offscreen");
+    });
+}
+
+async function record(target: "canvas" | "offscreen") {
+    if (!recordable) {
+        return;
+    }
+    const { player, audio, duration } = recordable;
+    const limit = recordRange.value === "all" ? duration : Number(recordRange.value);
+    const range: [number, number] = [0, Math.min(duration, limit)];
+
+    for (const button of recordButtons) button.disabled = true;
+    recordStatus.textContent = "准备中…";
+    const started = performance.now();
+
+    try {
+        const result = await recordPlayer(player, {
+            target,
+            fps: 60,
+            range,
+            // 离屏那份播放器尽量用和主播放器一样的后端
+            renderer: player.rendererName === "WebGPU" ? "webgpu"
+                : player.rendererName === "WebGL 1" ? "webgl1" : "canvas2d",
+            audio: { source: audio },
+            onProgress: (frame, total) => {
+                recordStatus.textContent = `${((frame / total) * 100).toFixed(1)}%（${frame}/${total} 帧）`;
+            },
+        });
+
+        const seconds = ((performance.now() - started) / 1000).toFixed(1);
+        const size = (result.blob.size / 1024 / 1024).toFixed(1);
+        recordStatus.textContent = `${result.container.toUpperCase()} / ${result.videoCodec}`
+            + `${result.audioCodec ? " + " + result.audioCodec : "（无音频）"}`
+            + `，${size} MB，耗时 ${seconds}s`;
+
+        const url = URL.createObjectURL(result.blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `kipphi-${target}.${result.container}`;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (error) {
+        console.error(error);
+        recordStatus.textContent = `失败：${(error as Error).message}`;
+    } finally {
+        for (const button of recordButtons) button.disabled = false;
+    }
+}
