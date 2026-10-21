@@ -251,6 +251,10 @@ export async function recordPlayer(player: Player, options: RecordOptions = {}):
     renderer.pause();
     // render() 末尾的 playSounds() 只在 playing 为真时跑；这里不调用 play()，避免拉起 rAF
     renderer.playing = true;
+    // 录制没有显示延迟，画面就不该再带 renderingOffset（它是给实时播放补偿用的），
+    // 否则画面的音符会比打击音（走 time，不含该偏移）早/晚一截
+    const previousRenderingOffset = renderer.renderingOffset;
+    renderer.renderingOffset = 0;
 
     try {
         for (let i = 0; i < totalFrames; i++) {
@@ -330,6 +334,8 @@ export async function recordPlayer(player: Player, options: RecordOptions = {}):
         videoEncoder.close();
         // 恢复成跟随音频
         renderer.offlineTime = null;
+        // 还原显示延迟补偿
+        renderer.renderingOffset = previousRenderingOffset;
         if (ownsRenderer) {
             renderer.destroy();
         } else if (wasPlaying) {
