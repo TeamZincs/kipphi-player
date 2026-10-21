@@ -62,13 +62,19 @@ const player = await Player.create(canvas, audioProcessor, audio, background, re
 
 setWasmPath(...); // web-demuxer所用的WASM文件，如果不需要BGA功能无需设置。
 
-await player.receive(chart, async (textureName) => {
-    // 自行实现纹理加载逻辑（在前端，需要的是Blob）
-    // 不需要纹理的话返回undefined或者null即可
-    return ...
-}, async (videoName) => {
-    return ...
-})
+// 贴图 / 视频 / 着色器都由适配器提供，三个方法都是可选的
+player.use({
+    texture: async (textureName) => {
+        // 自行实现纹理加载逻辑（在前端，需要的是 ImageBitmap）
+        // 找不到就返回 null
+        return ...
+    },
+    video: async (videoName) => {
+        return ...
+    },
+});
+
+await player.receive(chart);    // 现在只吃谱面
 document.onclick = () => {
     player.play();
 };
@@ -174,6 +180,37 @@ gpu.setEffect(0, 9, [{ shader: "invert", uniforms: { factor: 1 } }]);   // 只�
 - WebGL 1 用 `glsl`，WebGPU 用 `wgsl`，两边都给了才能跨后端
 - 没有设置任何特效时走原来的快路径，不产生额外 pass
 
+## 资源加载（适配器）
+
+贴图、视频、自定义着色器统一由「资源适配器」提供，播放器自己决定什么时候要、要哪些：
+
+```typescript
+player.use({
+    texture: (name) => loadImage(name),        // 名字同 chart.scanAllTextures()
+    video: (name) => loadVideo(name),          // 名字同 chart.scanAllVideos()
+    shader: (path) => loadShader(path),        // 路径同 chart.scanAllShaders()，以 / 开头
+});
+
+await player.receive(chart);
+```
+
+- 三个方法**都是可选的**：只做预览的宿主可以只实现 `texture`，没实现的类型会 warn 一次并跳过
+- `receive()` 只接收谱面，内部把当前引用到的资源一次性取回来
+- 已经加载过的不会重复取，`receive()` 换谱面时旧资源保留
+
+### 编辑期同步
+
+编辑器不用再自己盯着「刚才那个操作加了什么贴图 / 视频 / 着色器」，把操作列表交给播放器即可：
+
+```typescript
+const operations = new Op.OperationList(chart);
+player.watch(operations);
+```
+
+- 监听 `do` / `undo` / `redo`，停手 150ms 后重新对齐一次（`player.resourceSyncDelay` 可调），拖拽时不会每帧重扫
+- 只补缺的，不做卸载；`player.unwatch()` 取消监听，`player.destroy()` 也会自动取消
+- 想立刻对齐可以手动 `await player.syncResources()`
+
 ## 特效（Phira Effects）
 
 谱面自带的 `effects` 会自动接入这套机制：每帧把当前激活的特效转成着色器链，再按 `global` 决定作用范围。
@@ -229,16 +266,18 @@ gpu.setEffect(0, 9, [{ shader: "invert", uniforms: { factor: 1 } }]);   // 只�
 
 参数名与默认值对齐 Phira 文档。`progress` 是唯一一个会兜底的：谱面自己写了就按谱面的，没写时按特效的 `[start, end]` 自动算 0→1。
 
-自定义着色器（`shader` 以 `/` 开头，指向谱面包里的文件）通过 `receive()` 的第 4 个参数索取：
+自定义着色器（`shader` 以 `/` 开头，指向谱面包里的文件）同样走适配器：
 
 ```typescript
-await player.receive(chart, textureFetcher, videoFetcher, async (path) => {
-    const glsl = await loadTextFromPack(path);   // path 形如 "/xxx.frag"
-    return { name: path, glsl };                 // 有 WGSL 版本的话再加 wgsl
+player.use({
+    shader: async (path) => {
+        const glsl = await loadTextFromPack(path);   // path 形如 "/xxx.frag"
+        return { name: path, glsl };                 // 有 WGSL 版本的话再加 wgsl
+    },
 });
 ```
 
-要提前知道谱面引用了哪些文件，用 `chart.scanAllShaders()`（返回 `Set<string>`，保留开头的 `/`，和 `effect.shader` 一致；内置着色器不在其中）。`receive()` 内部就是用它在加载阶段一次性把着色器取回来并注册的，没提供 `shaderFetcher` 时只会 warn 并跳过这些特效。
+要提前知道谱面引用了哪些文件，用 `chart.scanAllShaders()`（返回 `Set<string>`，保留开头的 `/`，和 `effect.shader` 一致；内置着色器不在其中）。适配器没实现 `shader()` 时只会 warn 一次并跳过这些特效。
 
 自定义着色器遵循 Phira 约定：`#version 100` 的片元着色器，可用 `uv` / `screenTexture` / `screenSize` / `time`，自定义 uniform 用 `uniform float factor; // %0.5%` 声明默认值。拼装时会：
 

@@ -159,25 +159,20 @@ fileInput.addEventListener("change", async (e) => {
     player.baseOffset = -0.017;
     player.showsRenderingBaseline = false;
     player.hitEffectNoFollows = true;
-    player.receive(
-        chart,
-        async (name) => {
+    // 贴图 / 视频 / 着色器都从压缩包里取，直接按名字在根目录找
+    player.use({
+        texture: async (name) => {
             const file = findFile(name);
-            if (!file) {
-                return null;
-            } else {
-                return await createImageBitmap(new Blob([file.buffer]));
-            }
+            return file ? await createImageBitmap(new Blob([file.buffer])) : null;
         },
-        async (name) => {
-            // 和贴图一样，直接从压缩包根目录里找
+        video: async (name) => {
             const file = findFile(name);
             if (!file) {
                 throw new Error(`压缩包里没有这个视频: ${name}`);
             }
             return await VideoFrameSource.from(new File([file.buffer], name));
         },
-        async (path) => {
+        shader: async (path) => {
             // Phira 的自定义着色器路径以 / 开头（如 /xxx.frag），包内条目一般不带
             const file = findFile(path);
             if (!file) {
@@ -187,7 +182,8 @@ fileInput.addEventListener("change", async (e) => {
             // 注册名必须和谱面里的 effect.shader 完全一致，所以这里用原始 path
             return { name: path, glsl: new TextDecoder().decode(file.buffer) };
         },
-    );
+    });
+    await player.receive(chart);
     window.addEventListener("keydown", (e) => {
         if (e.key !== " ") {
             return;

@@ -16,6 +16,7 @@ import {
     NNNodeLike,
     type TimeT,
     type EffectStartNode,
+    type Op,
     VideoScale
 } from "kipphi";
 /// #default
@@ -597,6 +598,9 @@ const EFFECT_CHAINS: Record<string, (uniforms: EffectUniforms) => EffectRequest[
 };
 // #enddefault
 
+/** kipphi 的操作列表（`Op.OperationList`），编辑器的资源变更就是从它发出来的 */
+type OperationList = Op.OperationList;
+
 /** 渲染后端优先级 */
 export type RendererPreference = "auto" | "webgpu" | "webgl1" | "canvas2d";
 
@@ -613,6 +617,80 @@ export interface PlayerOptions {
     device?: unknown;
     /** GPU 图层的 z 范围，默认 `[0, 10]` */
     zRange?: [number, number];
+}
+
+// #default
+/**
+ * 资源适配器：谱面用到的贴图 / 视频 / 着色器都从这里取。
+ *
+ * 三个方法都是可选的——只做纯音频预览的宿主可以一个都不实现，
+ * 只做 2D 预览的宿主可以只实现 `texture`。
+ *
+ * ```ts
+ * player.use({
+ *     texture: name => fetchImage(name),
+ *     video: name => fetchVideo(name),
+ *     shader: path => fetchShader(path),
+ * });
+ * await player.receive(chart);
+ * ```
+ */
+export interface ResourceAdapter {
+    /** 取一张贴图（名字与 `chart.scanAllTextures()` 里的一致） */
+    texture?(name: string): Promise<ImageBitmap | null>;
+    /** 取一段视频（名字与 `chart.scanAllVideos()` 里的一致） */
+    video?(name: string): Promise<VideoFrameSource | null>;
+    /** 取一个自定义特效着色器（路径与 `chart.scanAllShaders()` 一致，以 `/` 开头） */
+    shader?(path: string): Promise<EffectShader | null>;
+}
+// #enddefault
+/* #node {
+// 资源适配器：Node 端没有 GPU，不需要着色器
+export interface ResourceAdapter {
+    // 取一张贴图（名字与 chart.scanAllTextures() 里的一致）
+    texture?(name: string): Promise<ImageBitmap | null>;
+    // 取一段视频（名字与 chart.scanAllVideos() 里的一致）
+    video?(name: string): Promise<VideoFrameSource | null>;
+}
+} */
+
+/** 会让谱面新增资源引用的操作事件 */
+const RESOURCE_EVENTS = ["do", "undo", "redo"] as const;
+
+/**
+ * 监听 `OperationList`，把编辑过程中新引用到的资源同步给播放器。
+ *
+ * 编辑器不需要自己盯着「刚才那个操作加了什么贴图 / 视频 / 着色器」，
+ * 操作结束后（默认等 150ms，避免拖拽时每帧都重扫）重新对齐一次即可。
+ */
+class ResourceSyncWatcher {
+    private timer: ReturnType<typeof setTimeout> | null = null;
+    private readonly listener = () => this.schedule();
+
+    constructor(
+        private readonly player: Player,
+        private readonly operations: OperationList,
+        private readonly delay: number,
+    ) { }
+
+    attach() {
+        for (const type of RESOURCE_EVENTS) this.operations.addEventListener(type, this.listener);
+    }
+
+    detach() {
+        for (const type of RESOURCE_EVENTS) this.operations.removeEventListener(type, this.listener);
+        if (this.timer !== null) clearTimeout(this.timer);
+        this.timer = null;
+    }
+
+    /** 合并同一批操作，只在停手之后扫一次 */
+    private schedule() {
+        if (this.timer !== null) return;
+        this.timer = setTimeout(() => {
+            this.timer = null;
+            void this.player.syncResources();
+        }, this.delay);
+    }
 }
 
 export class Player extends EventTarget {
@@ -701,6 +779,19 @@ export class Player extends EventTarget {
     
     textureMapping: Map<string, ImageBitmap> = new Map();
     videoMapping: Map<string, VideoFrameSource> = new Map();
+
+    /* ---------------------------- 资源加载 ---------------------------- */
+
+    /** 资源适配器，由 {@linkcode use} 设置 */
+    private adapter: ResourceAdapter | null = null;
+    /** 编辑操作监听，由 {@linkcode watch} 设置 */
+    private resourceWatcher: ResourceSyncWatcher | null = null;
+    /** 编辑停下多久之后重新对齐资源（毫秒） */
+    resourceSyncDelay = 150;
+    private syncingResources = false;
+    private syncPending = false;
+    /** 已经提醒过的资源问题，同一个 key 只提一次 */
+    private readonly warnedResources = new Set<string>();
 
     rootMatrix: Matrix33;
     baseMatrix: Matrix33;
@@ -2081,98 +2172,148 @@ export class Player extends EventTarget {
     }
     // #enddefault
 
-    async receive(
-        chart: Chart,
-        textureFetcher: (name: string) => Promise<ImageBitmap>,
-        // #default
-        videoFetcher?: (name: string) => Promise<VideoFrameSource>,
-        /** 谱面里引用的自定义特效着色器（`shader` 以 `/` 开头时按路径索取） */
-        shaderFetcher?: (path: string) => Promise<EffectShader | null>,
-        // #enddefault
-        /* #node {
-        videoFetcher: (name: string) => Promise<VideoFrameSource>
-        } */
-    ) {
+    /**
+     * 设置资源适配器。
+     *
+     * 谱面引用的贴图 / 视频 / 着色器都由它提供，可以在 {@linkcode receive} 之前或之后调用；
+     * 已经有谱面的话会立刻补一次缺的资源。
+     *
+     * ```ts
+     * player.use({
+     *     texture: name => fetchImage(name),
+     *     video: name => fetchVideo(name),
+     *     shader: path => fetchShader(path),
+     * });
+     * ```
+     */
+    use(adapter: ResourceAdapter) {
+        this.adapter = adapter;
+        if (this.chart) void this.syncResources();
+        return this;
+    }
+
+    /**
+     * 监听编辑器的操作列表，编辑过程中新引用到的资源会自动补齐。
+     *
+     * 不接编辑器（纯播放器）就不用调。重复调用会换掉上一个监听。
+     *
+     * ```ts
+     * player.watch(new Op.OperationList(chart));
+     * ```
+     */
+    watch(operations: OperationList, delay: number = this.resourceSyncDelay) {
+        this.resourceWatcher?.detach();
+        this.resourceWatcher = new ResourceSyncWatcher(this, operations, delay);
+        this.resourceWatcher.attach();
+        return this;
+    }
+
+    /** 停止监听操作列表 */
+    unwatch() {
+        this.resourceWatcher?.detach();
+        this.resourceWatcher = null;
+    }
+
+    /**
+     * 接收一张谱面。
+     *
+     * 贴图 / 视频 / 着色器都从 {@linkcode use} 设置的适配器取；再 {@linkcode watch}
+     * 上编辑器的操作列表，之后编辑过程中新加的资源也会自动补。
+     *
+     * 重复调用可以换谱面，已经加载过的资源会保留。
+     */
+    async receive(chart: Chart) {
         this.chart = chart;
-
         this.lastUnplayedNNNode = chart.nnnList.head.next;
-        // 还是播放器适合处理纹理请求这事（
-
-        const textures = chart.scanAllTextures();
-        textures.delete("line.png");
-        for (const texture of textures) {
-            const bmp = await textureFetcher(texture);
-            this.textureMapping.set(texture, bmp);
-        }
+        await this.syncResources();
         // #default
         // 纹理已经全部解码好，趁现在（加载阶段）就传到 GPU，别留到播放第一帧
         this.warmup();
         // #enddefault
-
-        // #default
-        if (this.gpu) {
-            // 只有以 / 开头的是谱面包里的自定义着色器，内置的由渲染端提供
-            const shaders = chart.scanAllShaders();
-            if (shaders.size > 0) {
-                if (shaderFetcher) {
-                    await this.loadEffectShaders(shaders, shaderFetcher);
-                } else {
-                    console.warn(`[Player] 谱面引用了 ${shaders.size} 个自定义特效着色器，`
-                        + "但没有提供 shaderFetcher，这些特效会被跳过");
-                }
-            }
-        }
-        // #enddefault
-
-        if (videoFetcher) {
-            const videos = chart.scanAllVideos();
-            for (const video of videos) {
-                try {
-                    const vid = await videoFetcher(video);
-                    this.videoMapping.set(video, vid);
-                } catch (error) {
-                    // 单个视频加载失败不该拖垮整张谱面，画面上就是没有 BGA 而已
-                    console.warn(`[Player] 视频加载失败，已跳过: ${video}`, error);
-                }
-            }
-        }
     }
 
-    // #default
     /**
-     * 把谱面引用到的自定义特效着色器（`shader` 以 `/` 开头）加载并注册。
+     * 把谱面当前引用到的资源补齐（已经加载过的跳过）。
      *
-     * 自定义着色器目前只有 GLSL（WebGL 1）一路；WebGPU 上会被跳过并 warn。
+     * `receive()` 会调一次，之后由 {@linkcode watch} 在编辑操作后自动调。
+     * @internal
      */
-    private async loadEffectShaders(paths: Iterable<string>, shaderFetcher: (path: string) => Promise<EffectShader | null>) {
-        const gpu = this.gpu;
-        if (!gpu) return;
-
-        for (const path of paths) {
-            if (gpu.getShader(path)) continue;
-            let shader: EffectShader | null = null;
-            try {
-                shader = await shaderFetcher(path);
-            } catch (error) {
-                console.warn(`[Player] 特效着色器加载失败: ${path}`, error);
-                continue;
+    async syncResources() {
+        const chart = this.chart;
+        if (!chart) return;
+        const adapter = this.adapter;
+        if (!adapter) {
+            this.warnResourceOnce("no-adapter",
+                "[Player] 还没有设置资源适配器，贴图/视频/着色器都拿不到；"
+                + "请先 player.use({ texture, video, shader })");
+            return;
+        }
+        if (this.syncingResources) {
+            // 正在同步时又被叫了一次，等这一轮跑完再补一遍
+            this.syncPending = true;
+            return;
+        }
+        this.syncingResources = true;
+        try {
+            for (const name of chart.scanAllTextures()) {
+                if (name === "line.png" || this.textureMapping.has(name)) continue;
+                const texture = await this.fetchResource("texture", name, adapter.texture?.(name));
+                if (texture) this.textureMapping.set(name, texture);
             }
-            if (!shader) {
-                console.warn(`[Player] 特效着色器加载失败: ${path}`);
-                continue;
+            for (const name of chart.scanAllVideos()) {
+                if (this.videoMapping.has(name)) continue;
+                const video = await this.fetchResource("video", name, adapter.video?.(name));
+                if (video) this.videoMapping.set(name, video);
             }
-            // 注册名必须和谱面里的 effect.shader 完全一致，否则查不到
-            if (!shader.name) shader.name = path;
-            if (gpu.kind === "webgpu" && !shader.wgsl) {
-                console.warn(`[Player] ${path} 只有 GLSL 版本，WebGPU 后端下会被跳过`);
-                continue;
+            // #default
+            const gpu = this.gpu;
+            for (const path of chart.scanAllShaders()) {
+                if (!gpu || gpu.getShader(path)) continue;
+                const shader = await this.fetchResource("shader", path, adapter.shader?.(path));
+                if (!shader) continue;
+                // 注册名必须和谱面里的 effect.shader 完全一致，否则查不到
+                if (!shader.name) shader.name = path;
+                if (gpu.kind === "webgpu" && !shader.wgsl) {
+                    this.warnResourceOnce(`wgsl:${path}`, `[Player] ${path} 只有 GLSL 版本，WebGPU 后端下会被跳过`);
+                    continue;
+                }
+                gpu.addShader(shader);
             }
-            gpu.addShader(shader);
+            // #enddefault
+        } finally {
+            this.syncingResources = false;
+            if (this.syncPending) {
+                this.syncPending = false;
+                void this.syncResources();
+            }
         }
     }
-    // #enddefault
+
+    /** 取一个资源；适配器没实现或失败都只 warn 一次，返回 null */
+    private async fetchResource<T>(kind: string, name: string, job: Promise<T | null> | undefined): Promise<T | null> {
+        if (!job) {
+            this.warnResourceOnce(`missing:${kind}`,
+                `[Player] 资源适配器没有实现 ${kind}()，相关资源会被跳过（谱面里用到的第一个是 ${name}）`);
+            return null;
+        }
+        try {
+            return await job;
+        } catch (error) {
+            this.warnResourceOnce(`fail:${kind}:${name}`, `[Player] ${kind} 加载失败: ${name}`, error);
+            return null;
+        }
+    }
+
+    /** 同一类问题只提醒一次 */
+    private warnResourceOnce(key: string, message: string, error?: unknown) {
+        if (this.warnedResources.has(key)) return;
+        this.warnedResources.add(key);
+        if (error === undefined) console.warn(message);
+        else console.warn(message, error);
+    }
 
     destroy() {
+        this.unwatch();
         this.tinter.destroy();
     }
 }
