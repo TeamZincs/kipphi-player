@@ -11,14 +11,57 @@
     let status = $state("正在准备资源…");
     let limit = $state("30");
 
-    DemoSession.create().then(created => {
+    // 注意：`$state` 的写入如果发生在**内联回调**里（`.then(x => { ... })`），
+    // grain 不会给那次写入插刷新调用；提成具名函数就有了。
+    function onSessionReady(created: DemoSession) {
         session = created;
         ready = true;
         status = "选一个谱面压缩包";
-    }).catch(error => {
+    }
+
+    function onSessionFailed(error: Error) {
         console.error(error);
-        status = `初始化失败：${(error as Error).message}`;
-    });
+        status = `初始化失败：${error.message}`;
+    }
+
+    function onPackLoaded(loaded: LoadedPack) {
+        pack = loaded;
+        hasPack = true;
+        status = "好了，空格播放 / 暂停";
+    }
+
+    function onPackFailed(error: Error) {
+        console.error(error);
+        status = `加载失败：${error.message}`;
+    }
+
+    function onRecordProgress(frame: number, total: number) {
+        status = `录制中 ${((frame / total) * 100).toFixed(1)}%（${frame}/${total} 帧）`;
+    }
+
+    function onRecordDone(result: Awaited<ReturnType<DemoSession["record"]>>) {
+        const seconds = ((performance.now() - startedAt) / 1000).toFixed(1);
+        const megabytes = (result.blob.size / 1024 / 1024).toFixed(1);
+        status = `${result.container.toUpperCase()} / ${result.videoCodec}`
+            + `${result.audioCodec ? " + " + result.audioCodec : "（无音频）"}`
+            + `，${megabytes} MB，耗时 ${seconds}s`;
+        downloadResult(result, `kipphi-${recordingTarget}`);
+    }
+
+    function onRecordFailed(error: Error) {
+        console.error(error);
+        status = `录制失败：${error.message}`;
+    }
+
+    /** `.finally` 也走具名函数，否则 busy 复位不了 */
+    function leaveBusy() {
+        busy = false;
+    }
+
+    let startedAt = 0;
+    let recordingTarget = "canvas";
+
+    DemoSession.create().then(onSessionReady).catch(onSessionFailed);
 
     function pick(event: Event) {
         const input = event.target as HTMLInputElement;
@@ -29,16 +72,7 @@
 
         busy = true;
         status = "正在解压…";
-        session.load(canvasEl, file).then(loaded => {
-            pack = loaded;
-            hasPack = true;
-            status = "好了，空格播放 / 暂停";
-        }).catch(error => {
-            console.error(error);
-            status = `加载失败：${(error as Error).message}`;
-        }).finally(() => {
-            busy = false;
-        });
+        session.load(canvasEl, file).then(onPackLoaded).catch(onPackFailed).finally(leaveBusy);
     }
 
     function record(target: "canvas" | "offscreen") {
@@ -49,23 +83,13 @@
 
         busy = true;
         status = "准备中…";
-        const started = performance.now();
+        startedAt = performance.now();
+        recordingTarget = target;
 
-        session.record(current, target, limit, (frame, total) => {
-            status = `录制中 ${((frame / total) * 100).toFixed(1)}%（${frame}/${total} 帧）`;
-        }).then(result => {
-            const seconds = ((performance.now() - started) / 1000).toFixed(1);
-            const megabytes = (result.blob.size / 1024 / 1024).toFixed(1);
-            status = `${result.container.toUpperCase()} / ${result.videoCodec}`
-                + `${result.audioCodec ? " + " + result.audioCodec : "（无音频）"}`
-                + `，${megabytes} MB，耗时 ${seconds}s`;
-            downloadResult(result, `kipphi-${target}`);
-        }).catch(error => {
-            console.error(error);
-            status = `录制失败：${(error as Error).message}`;
-        }).finally(() => {
-            busy = false;
-        });
+        session.record(current, target, limit, onRecordProgress)
+            .then(onRecordDone)
+            .catch(onRecordFailed)
+            .finally(leaveBusy);
     }
 
     const recordVisible = () => record("canvas");
