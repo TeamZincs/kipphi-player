@@ -48,19 +48,22 @@ export class AudioProcessor {
     /**
      * 录制时设上它：只记录打击音事件，不真的发声
      *
+     * `beats` 是这个音在谱面上的拍数（按**渲染**时间轴），录制端需要它来算准确时间，
+     * 不能直接拿当前帧的时间，否则会差一个 `renderingOffset`。
+     *
      * 录制结束后记得还原。
      */
-    captureNoteSound?: (type: NoteType) => void;
+    captureNoteSound?: (type: NoteType, beats: number) => void;
     /** 取某个音符类型对应的打击音 */
     getNoteSound(type: NoteType): AudioBuffer | undefined {
         return [this.tap, this.tap, this.flick, this.drag][type - 1];
     }
-    playNoteSound(type: NoteType) {
+    playNoteSound(type: NoteType, beats: number = 0) {
         if (!this.initialized) {
             return;
         }
         if (this.captureNoteSound) {
-            this.captureNoteSound(type);
+            this.captureNoteSound(type, beats);
             return;
         }
         this.play([this.tap, this.tap, this.flick, this.drag][type - 1])

@@ -32,7 +32,7 @@ export interface RecordAudioOptions {
     source?: Blob | ArrayBuffer;
     /** 是否混入打击音，缺省 true */
     hitSounds?: boolean;
-    /** 打击音增益，缺省 0.5（与服务端录制一致） */
+    /** 打击音增益，缺省 1.0 */
     hitSoundGain?: number;
 }
 
@@ -239,11 +239,12 @@ export async function recordPlayer(player: Player, options: RecordOptions = {}):
     videoEncoder.configure(videoConfig);
 
     // 3. 逐帧渲染
-    const capturedSounds: { type: NoteType; time: number }[] = [];
+    const capturedSounds: { type: NoteType; beats: number }[] = [];
     const audioProcessor = renderer.audioProcessor;
     const previousCapture = audioProcessor.captureNoteSound;
-    audioProcessor.captureNoteSound = type => {
-        capturedSounds.push({ type, time: renderer.renderingTime });
+    // 记的是谱面上的拍数，具体时间等混音时再按同一套偏移换到音频时间轴上
+    audioProcessor.captureNoteSound = (type, beats) => {
+        capturedSounds.push({ type, beats });
     };
 
     const wasPlaying = renderer.playing;
@@ -290,7 +291,7 @@ export async function recordPlayer(player: Player, options: RecordOptions = {}):
             const mixed = await mixAudio(renderer, range, duration, capturedSounds, {
                 sampleRate,
                 hitSounds: audioOptions.hitSounds ?? true,
-                hitSoundGain: audioOptions.hitSoundGain ?? 0.5,
+                hitSoundGain: audioOptions.hitSoundGain ?? 1.0,
                 source: audioOptions.source,
             });
             if (mixed) {
@@ -404,7 +405,7 @@ async function mixAudio(
     player: Player,
     range: [number, number],
     duration: number,
-    soundEvents: { type: NoteType; time: number }[],
+    soundEvents: { type: NoteType; beats: number }[],
     options: MixAudioOptions,
 ): Promise<AudioBuffer | null> {
     const bytes = await loadAudioBytes(player, options.source);
@@ -434,10 +435,24 @@ async function mixAudio(
         const gain = context.createGain();
         gain.gain.value = options.hitSoundGain;
         gain.connect(context.destination);
+
+        // 拍数 → 音频时间轴（秒）
+        //
+        //   renderingTime = audioTime - offset/1000 + baseOffset + renderingOffset * rate
+        //
+        // 谱面里的 note 是画在渲染时间轴上的，直接拿 renderingTime 当音频时间去排，
+        // 会整整差一个 (renderingOffset - offset/1000 + baseOffset)。
+        const playbackRate = player.audio.playbackRate || 1;
+        const toAudioTime = (beats: number) =>
+            player.chart!.timeCalculator.toSeconds(beats)
+            + player.chart!.offset / 1000
+            - player.baseOffset
+            - player.renderingOffset * playbackRate;
+
         for (const event of soundEvents) {
             const buffer = player.audioProcessor.getNoteSound(event.type);
             if (!buffer) continue;
-            const at = event.time - range[0];
+            const at = toAudioTime(event.beats) - range[0];
             if (at < 0 || at > duration) continue;
             const source = context.createBufferSource();
             source.buffer = buffer;

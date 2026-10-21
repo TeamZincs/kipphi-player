@@ -1798,6 +1798,8 @@ export class Player extends EventTarget {
         }
         let node: NNNOrTail = lastNNN;
         for (; node.type !== NodeType.TAIL && TC.toBeats(node.startTime) < beats; node = node.next) {
+            // 内层循环会遮蔽 node，先把这一拍的拍数取出来
+            const noteBeats = TC.toBeats(node.startTime);
             const nns = node.noteNodes;
             const hns = node.holdNodes;
             const nnl = nns.length;
@@ -1809,7 +1811,7 @@ export class Player extends EventTarget {
                     if (note.isFake) {
                         continue;
                     }
-                    this.audioProcessor.playNoteSound(note.type);
+                    this.audioProcessor.playNoteSound(note.type, noteBeats);
                 }
             }
             const hnl = hns.length;
@@ -1821,7 +1823,7 @@ export class Player extends EventTarget {
                     if (note.isFake) {
                         continue;
                     }
-                    this.audioProcessor.playNoteSound(NoteType.hold);
+                    this.audioProcessor.playNoteSound(NoteType.hold, noteBeats);
                 }
             }
         }
