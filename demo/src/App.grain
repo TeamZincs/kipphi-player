@@ -1,0 +1,13 @@
+<script>
+    import routes from "grain:routes";
+    import { createRouter } from "@graints/runtime";
+</script>
+
+<main id="outlet"></main>
+
+<script onmount>
+    const outlet = document.getElementById("outlet");
+    if (outlet) {
+        createRouter({ routes, target: outlet }).start();
+    }
+</script>

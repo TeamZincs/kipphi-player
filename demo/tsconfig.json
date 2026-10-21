@@ -1,0 +1,17 @@
+{
+    "compilerOptions": {
+        "target": "ES2022",
+        "module": "ESNext",
+        "moduleResolution": "bundler",
+        "lib": ["ES2022", "DOM", "DOM.Iterable"],
+        // 播放器那边没有单独的类型产物（直接发布 TS 源码），关掉这两项免得
+        // demo 的 tsconfig 把 kipphi-player 自己的风格问题一起报出来
+        "strict": false,
+        "verbatimModuleSyntax": false,
+        "skipLibCheck": true,
+        "isolatedModules": true,
+        "noEmit": true,
+        "types": ["@graints/runtime"]
+    },
+    "include": ["src"]
+}

@@ -1,0 +1,199 @@
+import {
+    AudioProcessor,
+    Images,
+    Player,
+    Respack,
+    VideoFrameSource,
+    recordPlayer,
+    setWasmPath,
+    type RecordResult,
+    type RendererPreference,
+} from "../..";
+import { Chart } from "kipphi";
+
+import { unzip } from "./unzip";
+
+export interface LoadedPack {
+    player: Player;
+    /** BGM 原始字节，录制时直接给，省得再 fetch 一遍 */
+    audio: ArrayBuffer;
+    duration: number;
+}
+
+/** 谱面里的资源路径可能带 `/`（自定义着色器就是 `/xxx.frag`）或 `./` 前缀，包内条目则不一定带 */
+const normalizePath = (path: string) => path.replace(/^(\.\/|\/)+/, "");
+
+export function parseInfoTxt(infoTxt: string) {
+    const lines = infoTxt.split("\n");
+    const info: Record<string, string> = {};
+    for (const line of lines) {
+        // 第一行是 #
+        if (line.startsWith("#")) continue;
+        if (line.trim() === "") continue;
+        const [key, value] = line.split(":");
+        if (!key || !value) {
+            console.log(`Invalid line: '${line}'`);
+            continue;
+        }
+        info[key.trim()] = value.trim();
+    }
+    return info;
+}
+
+/**
+ * 解析未解码的原始字节序列
+ *
+ * 先尝试 UTF-8，失败再试 GBK（老谱面包常见）。
+ */
+export function parseRawInfoTxt(raw: Uint8Array | ArrayBuffer) {
+    let infoTxt: string;
+    try {
+        infoTxt = new TextDecoder("utf-8", { fatal: true }).decode(raw);
+    } catch (error) {
+        if (!(error instanceof TypeError)) throw error;
+        infoTxt = new TextDecoder("gbk", { fatal: true }).decode(raw);
+    }
+    return parseInfoTxt(infoTxt);
+}
+
+/**
+ * demo 的一次「会话」：图片 / 字体 / 资源包 / 打击音这些只加载一次，
+ * 之后换谱面只重建 Player。
+ */
+export class DemoSession {
+    private constructor(
+        readonly respack: Respack,
+        readonly audioProcessor: AudioProcessor,
+    ) { }
+
+    /** 等静态资源就绪（字体没加载完就画的话，前几帧的文字会用兜底字体） */
+    static async create(): Promise<DemoSession> {
+        setWasmPath("./web-demuxer.wasm");
+        await Promise.all([
+            Images.loadAndOptimize({ anchor: "./Anchor.png", below: "./Below.png" }),
+            document.fonts.load("64px phigros"),
+        ]);
+        const respack = await Respack.loadFromPhira(async name => {
+            return await fetch(`./default/${name}`).then(r => r.blob());
+        });
+        const audioProcessor = new AudioProcessor();
+        await audioProcessor.init({
+            tap: "./Tap.wav",
+            drag: "./Drag.wav",
+            flick: "./Flick.wav",
+        });
+        return new DemoSession(respack, audioProcessor);
+    }
+
+    /** 解包 + 建播放器 */
+    async load(canvas: HTMLCanvasElement, file: File): Promise<LoadedPack> {
+        const unzipped = await unzip(file);
+        const findFile = (path: string) => {
+            const target = normalizePath(path);
+            return unzipped.files.find(item => normalizePath(item.name) === target);
+        };
+
+        const infoTxt = unzipped.files.find(item => item.name === "info.txt");
+        if (!infoTxt) throw new Error("压缩包里没有 info.txt");
+        const info = parseRawInfoTxt(infoTxt.buffer);
+        const chartFile = unzipped.files.find(item => item.name === info.Chart);
+        const illustrationFile = unzipped.files.find(item => item.name === info.Picture);
+        const audioFile = unzipped.files.find(item => item.name === info.Song);
+        if (!chartFile || !illustrationFile || !audioFile) {
+            throw new Error("压缩包缺少谱面 / 曲绘 / 音频");
+        }
+
+        const audio = new Audio(URL.createObjectURL(new Blob([audioFile.buffer as ArrayBuffer])));
+        await new Promise<void>(resolve => { audio.oncanplay = () => resolve(); });
+
+        // Phira 的 extra.json：BPM、视频通道、特效都在里面，不传的话就没有特效，
+        // scanAllShaders() 也是空的
+        const extraFile = findFile("extra.json");
+        let extraJson: unknown = undefined;
+        if (extraFile) {
+            try {
+                const text = new TextDecoder().decode(extraFile.buffer).replace(/^\uFEFF/, "");
+                extraJson = JSON.parse(text);
+            } catch (error) {
+                console.warn("[demo] extra.json 解析失败，忽略:", error);
+            }
+        } else {
+            console.warn("[demo] 压缩包里没有 extra.json，特效和 BGA 都不会有");
+        }
+
+        const chart = Chart.fromRPEJSON(
+            JSON.parse(new TextDecoder().decode(chartFile.buffer)),
+            audio.duration,
+            extraJson as never,
+        );
+        const background = await createImageBitmap(new Blob([illustrationFile.buffer as ArrayBuffer]));
+
+        // 可以用 ?renderer=webgl1 / canvas2d / webgpu 强制指定后端
+        const requested = new URLSearchParams(location.search).get("renderer");
+        const renderer = (["auto", "webgpu", "webgl1", "canvas2d"] as const).includes(requested as never)
+            ? requested as RendererPreference
+            : "auto";
+
+        const player = await Player.create(canvas, this.audioProcessor, audio, background, this.respack, { renderer });
+        console.log(`[demo] 渲染后端: ${player.rendererName}`);
+        // 实时预览用的显示延迟补偿；录制时 recorder 会临时归零
+        player.renderingOffset = -0.40;
+        player.baseOffset = -0.017;
+        player.showsRenderingBaseline = false;
+        player.hitEffectNoFollows = true;
+
+        player.use({
+            texture: async (name) => {
+                const file = findFile(name);
+                return file ? await createImageBitmap(new Blob([file.buffer as ArrayBuffer])) : null;
+            },
+            video: async (name) => {
+                const file = findFile(name);
+                if (!file) throw new Error(`压缩包里没有这个视频: ${name}`);
+                return await VideoFrameSource.from(new File([file.buffer as ArrayBuffer], name));
+            },
+            shader: async (path) => {
+                const file = findFile(path);
+                if (!file) {
+                    console.warn(`[demo] 压缩包里没有这个着色器: ${path}`);
+                    return null;
+                }
+                // 注册名必须和谱面里的 effect.shader 完全一致，所以用原始 path
+                return { name: path, glsl: new TextDecoder().decode(file.buffer) };
+            },
+        });
+        await player.receive(chart);
+
+        return { player, audio: audioFile.buffer.slice(0), duration: chart.duration };
+    }
+
+    /** 录一段，`limit` 是秒数或 "all" */
+    async record(
+        pack: LoadedPack,
+        target: "canvas" | "offscreen",
+        limit: string,
+        onProgress: (frame: number, total: number) => void,
+    ): Promise<RecordResult> {
+        const end = limit === "all" ? pack.duration : Math.min(pack.duration, Number(limit));
+        return await recordPlayer(pack.player, {
+            target,
+            fps: 60,
+            range: [0, end],
+            // 离屏那份播放器尽量用和主播放器一样的后端
+            renderer: pack.player.rendererName === "WebGPU" ? "webgpu"
+                : pack.player.rendererName === "WebGL 1" ? "webgl1" : "canvas2d",
+            audio: { source: pack.audio },
+            onProgress,
+        });
+    }
+}
+
+/** 把录好的文件塞给浏览器下载 */
+export function downloadResult(result: RecordResult, name: string) {
+    const url = URL.createObjectURL(result.blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${name}.${result.container}`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}

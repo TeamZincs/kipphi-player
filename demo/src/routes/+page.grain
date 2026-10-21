@@ -1,0 +1,129 @@
+<script>
+    import { DemoSession, downloadResult, type LoadedPack } from "../session";
+
+    let session: DemoSession | null = null;
+    let pack: LoadedPack | null = null;
+    let canvasEl: HTMLCanvasElement | null = null;
+
+    let ready = $state(false);
+    let hasPack = $state(false);
+    let busy = $state(false);
+    let status = $state("正在准备资源…");
+    let limit = $state("30");
+
+    DemoSession.create().then(created => {
+        session = created;
+        ready = true;
+        status = "选一个谱面压缩包";
+    }).catch(error => {
+        console.error(error);
+        status = `初始化失败：${(error as Error).message}`;
+    });
+
+    function pick(event: Event) {
+        const input = event.target as HTMLInputElement;
+        const file = input.files?.[0];
+        if (!file || !session || !canvasEl) {
+            return;
+        }
+
+        busy = true;
+        status = "正在解压…";
+        session.load(canvasEl, file).then(loaded => {
+            pack = loaded;
+            hasPack = true;
+            status = "好了，空格播放 / 暂停";
+        }).catch(error => {
+            console.error(error);
+            status = `加载失败：${(error as Error).message}`;
+        }).finally(() => {
+            busy = false;
+        });
+    }
+
+    function record(target: "canvas" | "offscreen") {
+        const current = pack;
+        if (!current || !session || busy) {
+            return;
+        }
+
+        busy = true;
+        status = "准备中…";
+        const started = performance.now();
+
+        session.record(current, target, limit, (frame, total) => {
+            status = `录制中 ${((frame / total) * 100).toFixed(1)}%（${frame}/${total} 帧）`;
+        }).then(result => {
+            const seconds = ((performance.now() - started) / 1000).toFixed(1);
+            const megabytes = (result.blob.size / 1024 / 1024).toFixed(1);
+            status = `${result.container.toUpperCase()} / ${result.videoCodec}`
+                + `${result.audioCodec ? " + " + result.audioCodec : "（无音频）"}`
+                + `，${megabytes} MB，耗时 ${seconds}s`;
+            downloadResult(result, `kipphi-${target}`);
+        }).catch(error => {
+            console.error(error);
+            status = `录制失败：${(error as Error).message}`;
+        }).finally(() => {
+            busy = false;
+        });
+    }
+
+    const recordVisible = () => record("canvas");
+    const recordOffscreen = () => record("offscreen");
+</script>
+
+<section class="bar">
+    <input type="file" accept=".zip" onchange={pick} disabled={!ready || busy} />
+
+    <label>
+        时长
+        <select bind:value={limit} disabled={busy}>
+            <option value="10">前 10 秒</option>
+            <option value="30">前 30 秒</option>
+            <option value="all">整首</option>
+        </select>
+    </label>
+
+    <button onclick={recordVisible} disabled={!hasPack || busy}>录制（可见画布）</button>
+    <button onclick={recordOffscreen} disabled={!hasPack || busy}>后台录制</button>
+
+    <span class="status">{status}</span>
+</section>
+
+<canvas id="player-canvas" width="1600" height="900"></canvas>
+
+<script onmount>
+    canvasEl = document.getElementById("player-canvas") as HTMLCanvasElement | null;
+
+    window.addEventListener("keydown", event => {
+        if (event.key !== " " || !pack) {
+            return;
+        }
+        // 空格别把页面滚下去
+        event.preventDefault();
+        if (pack.player.playing) {
+            pack.player.pause();
+        } else {
+            pack.player.play();
+        }
+    });
+</script>
+
+<style>
+    .bar {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+        padding: 0.5rem 0.75rem;
+    }
+
+    .bar button {
+        padding: 0.25rem 0.6rem;
+    }
+
+    .status {
+        color: #9aa;
+        font-variant-numeric: tabular-nums;
+    }
+</style>
