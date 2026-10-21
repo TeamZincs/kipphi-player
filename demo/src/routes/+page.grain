@@ -1,5 +1,5 @@
 <script>
-    import { DemoSession, downloadResult, type LoadedPack } from "../session";
+    import { getSession, type DemoSession, type LoadedPack } from "../session";
 
     let session: DemoSession | null = null;
     let pack: LoadedPack | null = null;
@@ -9,9 +9,8 @@
     let hasPack = $state(false);
     let busy = $state(false);
     let status = $state("正在准备资源…");
-    let limit = $state("30");
 
-    DemoSession.create().then(created => {
+    getSession().then(created => {
         session = created;
         ready = true;
         status = "选一个谱面压缩包";
@@ -40,55 +39,11 @@
             busy = false;
         }
     }
-
-    async function record(target: "canvas" | "offscreen") {
-        const current = pack;
-        if (!current || !session || busy) {
-            return;
-        }
-
-        busy = true;
-        status = "准备中…";
-        const started = performance.now();
-
-        try {
-            const result = await session.record(current, target, limit, (frame, total) => {
-                status = `录制中 ${((frame / total) * 100).toFixed(1)}%（${frame}/${total} 帧）`;
-            });
-
-            const seconds = ((performance.now() - started) / 1000).toFixed(1);
-            const megabytes = (result.blob.size / 1024 / 1024).toFixed(1);
-            status = `${result.container.toUpperCase()} / ${result.videoCodec}`
-                + `${result.audioCodec ? " + " + result.audioCodec : "（无音频）"}`
-                + `，${megabytes} MB，耗时 ${seconds}s`;
-            downloadResult(result, `kipphi-${target}`);
-        } catch (error) {
-            console.error(error);
-            status = `录制失败：${(error as Error).message}`;
-        } finally {
-            busy = false;
-        }
-    }
-
-    const recordVisible = () => void record("canvas");
-    const recordOffscreen = () => void record("offscreen");
 </script>
 
 <section class="bar">
     <input type="file" accept=".zip" onchange={pick} disabled={!ready || busy} />
-
-    <label>
-        时长
-        <select bind:value={limit} disabled={busy}>
-            <option value="10">前 10 秒</option>
-            <option value="30">前 30 秒</option>
-            <option value="all">整首</option>
-        </select>
-    </label>
-
-    <button onclick={recordVisible} disabled={!hasPack || busy}>录制（可见画布）</button>
-    <button onclick={recordOffscreen} disabled={!hasPack || busy}>后台录制</button>
-
+    <a href="/record">去录制</a>
     <span class="status">{status}</span>
 </section>
 
@@ -118,10 +73,6 @@
         gap: 0.75rem;
         flex-wrap: wrap;
         padding: 0.5rem 0.75rem;
-    }
-
-    .bar button {
-        padding: 0.25rem 0.6rem;
     }
 
     .status {

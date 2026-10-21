@@ -197,3 +197,16 @@ export function downloadResult(result: RecordResult, name: string) {
     link.click();
     setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
+
+let singleton: Promise<DemoSession> | null = null;
+
+/**
+ * 两个路由共用一个会话：图片 / 字体 / 资源包 / 打击音只加载一次。
+ *
+ * 每个页面自己建播放器（各有一块 canvas），但底层资源是共享的。
+ */
+export function getSession(): Promise<DemoSession> {
+    singleton ??= DemoSession.create();
+
+    return singleton;
+}
