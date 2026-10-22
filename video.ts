@@ -39,6 +39,8 @@ const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, m
 const PINNED = 3;
 /** 转码多久没有任何新帧就算卡住（毫秒） */
 const STALL_MS = 5000;
+/** 回放解码队列满着、多久没有任何新帧就判定解码器死了（毫秒） */
+const DECODER_STALL_MS = 1500;
 
 /**
  * 转码队列：同一时刻只转一条视频
@@ -88,7 +90,12 @@ interface FrameNode {
  * 正向流与反向流唯一的区别是「流内下标 ↔ 原始帧号」的映射。
  */
 class DirStream {
-    readonly decoder: VideoDecoder;
+    /** 卡住时会整个换掉，所以不是 readonly */
+    decoder: VideoDecoder;
+    /** 上一次看到进展（喂进去 / 解出来）的时刻，判断解码器是不是卡死了 */
+    private lastProgressAt = performance.now();
+    private lastFed = -1;
+    private lastCount = -1;
     head: FrameNode | null = null;
     tail: FrameNode | null = null;
     count = 0;
@@ -224,8 +231,54 @@ class DirStream {
         this.pendingReset = true;
     }
 
+    /**
+     * 解码器卡死了就换一个
+     *
+     * 实测症状：`decoder.state` 还是 `configured`、队列一直满着（12），但再也不吐帧，
+     * 画面就定在开头几帧。`reset()` 救不回来（会话已经废了），只能 close 掉重建。
+     * 常见诱因是硬件解码会话数量超限 —— Chrome 对同时存在的 H.264 解码器有上限，
+     * 超出的那些不会报错，只是从此不出帧。
+     */
+    private checkStall(pos: number) {
+        // 喂进去的块数、解出来的帧数，任何一个在变就说明还活着
+        if (this.fedUpTo !== this.lastFed || this.count !== this.lastCount) {
+            this.lastFed = this.fedUpTo;
+            this.lastCount = this.count;
+            this.lastProgressAt = performance.now();
+
+            return;
+        }
+
+        // 队列没堵满，说明是我们在等位置，不算卡
+        if (this.decoder.decodeQueueSize < this.window) return;
+        if (performance.now() - this.lastProgressAt < DECODER_STALL_MS) return;
+
+        let start = 0;
+        for (let i = Math.min(pos, this.chunks.length - 1); i >= 0; i--) {
+            if (this.chunks[i]!.type === "key") { start = i; break; }
+        }
+
+        console.warn(`[video] 回放解码器卡住了（队列 ${this.decoder.decodeQueueSize}，`
+            + `已 ${((performance.now() - this.lastProgressAt) / 1000).toFixed(1)}s 没有进展），重建一个`);
+
+        try { this.decoder.close(); } catch { }
+
+        this.decoder = new VideoDecoder({
+            output: frame => this.receive(frame),
+            error: e => this.onError(e instanceof Error ? e : new Error(String(e)))
+        });
+        this.decoder.configure(this.config);
+        this.fedUpTo = start;
+        this.pendingReset = true;
+        this.lastProgressAt = performance.now();
+        this.lastFed = this.fedUpTo;
+        this.lastCount = this.count;
+    }
+
     /** 补帧到 pos（含前瞻） */
     ensure(pos: number) {
+        this.checkStall(pos);
+
         const target = Math.min(this.chunks.length - 1, pos + this.lookahead);
         let guard = 0;
         while (this.fedUpTo <= target && this.fedUpTo < this.chunks.length && guard++ < 128) {
@@ -358,10 +411,11 @@ export class VideoRenderingSource {
     /** 总帧数 */
     total = 0;
 
-    forward!: DirStream;
-    /** 反向流要等整段转完才能建（它的开头来自视频最后那个 GOP） */
+    /** 正向流：第一次取帧时才建（见 ensureForward） */
+    forward: DirStream | null = null;
+    /** 反向流：要等整段转完（它的开头来自视频最后那个 GOP），而且真的倒放时才建 */
     backward: DirStream | null = null;
-    current!: DirStream;
+    current: DirStream | null = null;
     direction = 1;
     private lastOrig = -1;
     error: Error | null = null;
@@ -450,17 +504,47 @@ export class VideoRenderingSource {
             this.error = e;
         };
 
-        this.forward = new DirStream(false, this.forwardChunks, this.total, this.gop, this.fps,
-            this.window, this.replayConfig!, onReplayError);
-        this.current = this.forward;
+        this.onReplayError = onReplayError;
 
-        // 整段转完后补上反向流（它的开头来自最后一个 GOP，必须等转完）
+        // 正向流按需创建（见 ensureForward）：硬件 H.264 解码会话有数量上限
+        // （常见 3 个），两条视频各建正反向就是 4 个，多出来的会被静默丢弃 ——
+        // 状态还是 `configured`，但队列再也不会前进，画面就定在开头几帧。
+
+        // 整段转完后只把反向流的 chunk 留着，等真的需要倒放时再建解码器
         this.transcoding = done.then(({ backward }) => {
             if (this.destroyed) return;
-            this.backward = new DirStream(true, backward, this.total, this.gop, this.fps,
-                this.window, this.replayConfig!, onReplayError);
+            this.backwardChunks = backward;
             this.onProgress?.(1, "reverse-ready");
         }).catch(() => { }); // 错误已经由上面的 done.catch 处理了
+    }
+
+    /** 回放解码器：真正要用的时候才建 */
+    private readonly replayError = (e: Error) => this.onReplayError?.(e);
+    private onReplayError: ((e: Error) => void) | null = null;
+    private backwardChunks: EncodedVideoChunk[] | null = null;
+
+    /** 需要正向流时才创建（省一个硬件解码会话） */
+    private ensureForward(): DirStream | null {
+        // 还没就绪（replayConfig 没有）就没法配置解码器
+        if (!this.replayConfig) return null;
+        if (!this.forward) {
+            this.forward = new DirStream(false, this.forwardChunks, this.total, this.gop, this.fps,
+                this.window, this.replayConfig, this.replayError);
+        }
+        if (!this.current) this.current = this.forward;
+
+        return this.forward;
+    }
+
+    /** 需要反向流时才创建（反向数据转码完才有） */
+    private ensureBackward(): DirStream | null {
+        if (this.backward) return this.backward;
+        if (!this.backwardChunks) return null;
+
+        this.backward = new DirStream(true, this.backwardChunks, this.total, this.gop, this.fps,
+            this.window, this.replayConfig!, this.replayError);
+
+        return this.backward;
     }
 
     /** 检查是否够帧数可以对外可用了 */
@@ -772,7 +856,13 @@ export class VideoRenderingSource {
 
     /** 同步索取 time（秒）时刻的帧 */
     getFrame(time: number): VideoFrame | null {
-        if (this.error || !this.current) return null;
+        if (this.error) return null;
+
+        // 正向流按需建；还没这个函数的时候 current 是空的
+        this.ensureForward();
+
+        if (!this.current) return null;
+
         const orig = clamp(this.indexAt(time), 0, Math.max(0, this.total - 1));
         if (this.lastOrig >= 0 && orig !== this.lastOrig) {
             const dir = orig > this.lastOrig ? 1 : -1;
@@ -834,9 +924,13 @@ export class VideoRenderingSource {
      * - 还没转到那一帧（转码还在追）时立刻返回，等也没用
      */
     async prepare(time: number, budget = 50): Promise<void> {
+        if (this.error) return;
+
+        this.ensureForward();
+
         const stream = this.current;
 
-        if (this.error || !stream) return;
+        if (!stream) return;
 
         // 想要哪一帧（还没截到范围内）
         const wanted = this.indexAt(time);
@@ -868,18 +962,23 @@ export class VideoRenderingSource {
     }
 
     private switchDirection(dir: number, pivotOrig: number) {
-        const next = dir > 0 ? this.forward : this.backward;
+        const current = this.current ?? this.ensureForward();
+
+        if (!current) return;
+
+        const next = dir > 0 ? this.forward : this.ensureBackward();
+
         // 反向流还没准备好就先继续用正向流（会退化成「给最近的帧」）
-        if (!next || next === this.current) {
+        if (!next || next === current) {
             this.direction = dir;
             return;
         }
         // 1. 收获当前链表里、新方向紧邻的那几帧
-        const seeds = this.current.harvest(dir, pivotOrig);
+        const seeds = current.harvest(dir, pivotOrig);
         // 2. 旧方向剩下的全释放，停掉它的补帧
-        this.current.dropAll();
-        this.current.resetTo(this.current.toPos(pivotOrig));
-        this.current.pendingReset = false; // 它已经空了，下次用要重新定位
+        current.dropAll();
+        current.resetTo(current.toPos(pivotOrig));
+        current.pendingReset = false; // 它已经空了，下次用要重新定位
         // 3. 新方向：拿这批帧做种子，从 pivot 所在 GOP 重新开始解
         next.adopt(seeds, pivotOrig);
         this.current = next;
