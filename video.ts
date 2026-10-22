@@ -37,6 +37,16 @@ const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, m
  * 画面就停在那一帧不动了。
  */
 const PINNED = 3;
+/** 转码多久没有任何新帧就算卡住（毫秒） */
+const STALL_MS = 5000;
+
+/**
+ * 转码队列：同一时刻只转一条视频
+ *
+ * 每条视频要占 1 个源解码器 + 2 个编码器（正向 / 反向），两条一起来就是 6 个硬件
+ * 会话；实测（Designant.zip 的两条 BGA）会双双卡在十几二十秒处不动。
+ */
+let transcodeQueue: Promise<unknown> = Promise.resolve();
 const clamp = (x: number, l: number, r: number) => x < l ? l : x > r ? r : x;
 
 export interface VideoSourceOptions {
@@ -101,7 +111,9 @@ class DirStream {
         private readonly config: VideoDecoderConfig,
         private readonly onError: (e: Error) => void
     ) {
-        this.lookahead = Math.max(1, Math.floor(window / 2));
+        // 至少往前喂满一个窗口：喂得比窗口浅的话，解码稍慢一点链表里就没有
+        // 当前帧，`prepare` 每次都得等到超时（实测每帧卡 100ms）
+        this.lookahead = Math.max(2, window);
         this.decoder = new VideoDecoder({
             output: frame => this.receive(frame),
             error: e => this.onError(e instanceof Error ? e : new Error(String(e)))
@@ -195,6 +207,8 @@ class DirStream {
         let guard = 0;
         while (this.fedUpTo <= target && this.fedUpTo < this.chunks.length && guard++ < 128) {
             if (this.decoder.state !== "configured") break;
+            // 队列太深就停手：解出来的帧会排成一长队，画面反而更滞后
+            if (this.decoder.decodeQueueSize >= this.window) break;
             this.decoder.decode(this.chunks[this.fedUpTo++]!);
         }
     }
@@ -335,6 +349,17 @@ export class VideoRenderingSource {
 
     /** 正向流的 chunk（转码过程中会一直往里加，DirStream 直接持有这个引用） */
     private readonly forwardChunks: EncodedVideoChunk[] = [];
+
+    /**
+     * 每帧在**源视频**里的时间戳（秒）
+     *
+     * 容器里写的 `avg_frame_rate` / `r_frame_rate` 不一定可信（实测有 94 秒、1245 帧
+     * 的 BGA 被标成 60fps），拿它换算「时间 → 帧号」会让视频播到第 20 秒就停住。
+     * 所以按解码出来的帧自己的时间戳建表，用二分查。
+     */
+    private readonly frameTimes: number[] = [];
+    /** 时间戳是否单调；有 B 帧（解码顺序 ≠ 显示顺序）时就不单调，退回按容器帧率算 */
+    private framesMonotonic = true;
     private replayConfig: VideoDecoderConfig | null = null;
     /** 就绪所需帧数；视频比 readySeconds 短时等全部转完 */
     private readyFrames = 0;
@@ -381,7 +406,11 @@ export class VideoRenderingSource {
             ? Math.round(this.readySeconds * this.fps)
             : Infinity;
 
-        const done = this.transcode(sourceConfig);
+        // 转码排队：一条视频要占「1 个源解码器 + 正向/反向 2 个编码器」，
+        // 两条视频同时开就是 6 个硬件会话，实测会把编码器池用光、双双卡死在半路
+        const done = transcodeQueue.then(() => this.transcode(sourceConfig));
+
+        transcodeQueue = done.catch(() => { });
         done.catch(e => {
             // 转码失败也要放行，否则 init 永远挂着
             this.error = e instanceof Error ? e : new Error(String(e));
@@ -512,6 +541,13 @@ export class VideoRenderingSource {
         const decoder = new VideoDecoder({
             output: source => {
                 const i = index++;
+                // 记下源帧的真实时间戳：换算「时间 → 帧号」用得上
+                const pts = source.timestamp * US;
+                const last = this.frameTimes[this.frameTimes.length - 1];
+
+                if (last !== undefined && pts < last) this.framesMonotonic = false;
+                this.frameTimes.push(pts);
+
                 context.drawImage(source, 0, 0, width, height);
                 source.close(); // 立刻还给源解码器
                 const scaled = new VideoFrame(canvas as CanvasImageSource, {
@@ -537,22 +573,80 @@ export class VideoRenderingSource {
 
         const startedAt = performance.now();
         const reader = this.demuxer.read("video", 0, this.duration || undefined).getReader();
-        while (!this.error && !this.destroyed) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            decoder.decode(value as EncodedVideoChunk);
-            while (backlogged()) {
-                await Promise.race([this.nextDequeue(decoder), sleep(4)]);
+
+        /**
+         * 看门狗：一段时间没有任何新帧就当卡住了，用已经转好的部分收尾
+         *
+         * 实测（Designant.zip）里 94 秒的 BGA 只能读到 20.7 秒，之后
+         * `reader.read()` 永远不返回 —— 没有这层保护的话整个转码挂在那儿，
+         * `total` 不再增长，`transcoding` 也永远不 resolve，反向流永远建不出来。
+         */
+        let lastIndex = -1;
+        let lastProgressAt = performance.now();
+        let stalled = false;
+        let wake: (() => void) | null = null;
+        const stall = new Promise<void>(resolve => { wake = resolve; });
+
+        const watchdog = setInterval(() => {
+            if (index !== lastIndex) {
+                lastIndex = index;
+                lastProgressAt = performance.now();
+
+                return;
             }
+            if (performance.now() - lastProgressAt > STALL_MS && !stalled) {
+                stalled = true;
+                console.warn(`[video] 转码卡住了（已解 ${index} 帧、到 ${(this.frameTimes[index - 1] ?? 0).toFixed(2)}s，`
+                    + `容器说 ${this.duration.toFixed(2)}s；队列 解码=${decoder.decodeQueueSize}`
+                    + ` 正向=${forwardEncoder.encodeQueueSize} 反向=${reverseEncoder.encodeQueueSize}），`
+                    + `用已经转好的部分继续`);
+                wake?.();
+            }
+        }, 500);
+
+        try {
+            while (!this.error && !this.destroyed) {
+                const next = await Promise.race([reader.read(), stall.then(() => null)]);
+
+                // 卡住了
+                if (!next) break;
+                if (next.done) break;
+
+                lastProgressAt = performance.now();
+                decoder.decode(next.value as EncodedVideoChunk);
+
+                while (backlogged() && !this.error && !stalled) {
+                    await this.nextDequeue(decoder);
+                }
+                if (stalled) break;
+            }
+        } finally {
+            clearInterval(watchdog);
         }
+
+        try { await reader.cancel(); } catch { }
+
         if (gopBuffer.length) pushReverseGop();
-        await decoder.flush();
-        await forwardEncoder.flush();
-        await reverseEncoder.flush();
+
+        // flush 也可能卡住（解码器已经不动了），都带超时
+        const settle = async (promise: Promise<void>, ms: number, label: string) => {
+            try {
+                await Promise.race([promise, sleep(ms)]);
+            } catch (error) {
+                console.warn(`[video] ${label} 失败`, error);
+            }
+        };
+
+        await settle(decoder.flush(), STALL_MS, "decoder.flush");
+        await settle(forwardEncoder.flush(), STALL_MS, "forwardEncoder.flush");
+        await settle(reverseEncoder.flush(), STALL_MS, "reverseEncoder.flush");
         this.total = index;
         this.onProgress?.(1, "transcode");
         const seconds = (performance.now() - startedAt) / 1000;
+        const span = (this.frameTimes[this.frameTimes.length - 1] ?? 0).toFixed(2);
         console.log(`[video] 转码完成: ${encoderConfig.codec} ${width}x${height} ${this.total} 帧,`
+            + ` 源时间戳 0~${span}s (有效 ${(this.total / Math.max(Number(span), 0.01)).toFixed(1)} fps,`
+            + ` 容器声明 ${this.fps.toFixed(2)} fps),`
             + ` 耗时 ${seconds.toFixed(1)}s (${(this.total / Math.max(seconds, 0.001)).toFixed(1)} fps)`);
 
         decoder.close();
@@ -592,23 +686,70 @@ export class VideoRenderingSource {
         });
     }
 
-    private nextDequeue(decoder: VideoDecoder): Promise<void> {
+    /**
+     * 等解码器消化一点（最多等 `ms` 毫秒）
+     *
+     * 必须带超时并且**一定把监听摘掉**：以前用 `Promise.race([等待, sleep(4)])`，
+     * 走 sleep 那条路时监听器永远不会被移除，几千帧下来堆成几万个，
+     * 之后每次 dequeue 都要把它们全跑一遍 —— 转码就是这么被拖死的。
+     */
+    private nextDequeue(decoder: VideoDecoder, ms = 8): Promise<void> {
         return new Promise<void>(resolve => {
             const target = decoder as unknown as EventTarget;
-            const handler = () => {
+            let done = false;
+
+            const finish = () => {
+                if (done) return;
+                done = true;
                 target.removeEventListener("dequeue", handler);
+                clearTimeout(timer);
                 resolve();
             };
+            const handler = () => finish();
+            const timer = setTimeout(finish, ms);
+
             target.addEventListener("dequeue", handler);
         });
     }
 
     // ==== 对外接口 ====
 
+    /**
+     * 时间（秒，源视频时间轴）→ 帧号
+     *
+     * 优先查真实的帧时间戳表（容器里的帧率常常不靠谱）；表还不可用时退回按帧率算。
+     */
+    private indexAt(time: number): number {
+        const times = this.frameTimes;
+
+        if (!this.framesMonotonic || times.length < 2) {
+            return Math.max(0, Math.round(time * this.fps));
+        }
+
+        if (time <= times[0]!) return 0;
+
+        let low = 0;
+        let high = times.length - 1;
+        let best = 0;
+
+        while (low <= high) {
+            const mid = (low + high) >> 1;
+
+            if (times[mid]! <= time) {
+                best = mid;
+                low = mid + 1;
+            } else {
+                high = mid - 1;
+            }
+        }
+
+        return best;
+    }
+
     /** 同步索取 time（秒）时刻的帧 */
     getFrame(time: number): VideoFrame | null {
         if (this.error || !this.current) return null;
-        const orig = clamp(Math.round(time * this.fps), 0, Math.max(0, this.total - 1));
+        const orig = clamp(this.indexAt(time), 0, Math.max(0, this.total - 1));
         if (this.lastOrig >= 0 && orig !== this.lastOrig) {
             const dir = orig > this.lastOrig ? 1 : -1;
             if (dir !== this.direction) this.switchDirection(dir, this.lastOrig);
@@ -634,13 +775,13 @@ export class VideoRenderingSource {
      * - `budget`：最多等多少毫秒。超时就拿着现有帧凑合，卡一帧比整帧不画好
      * - 还没转到那一帧（转码还在追）时立刻返回，等也没用
      */
-    async prepare(time: number, budget = 100): Promise<void> {
+    async prepare(time: number, budget = 50): Promise<void> {
         const stream = this.current;
 
         if (this.error || !stream) return;
 
         // 想要哪一帧（还没截到范围内）
-        const wanted = Math.round(time * this.fps);
+        const wanted = this.indexAt(time);
 
         // 转码还没转到这儿，等也等不到
         if (wanted >= this.total) return;
@@ -649,7 +790,15 @@ export class VideoRenderingSource {
         const deadline = performance.now() + budget;
 
         for (let i = 0; i < 512; i++) {
-            if (this.current?.has(orig)) return;
+            const current = this.current;
+
+            if (!current) return;
+            if (current.has(orig)) return;
+
+            // 解码已经越过这个位置了：`take` 会给最接近的一帧，差一两帧看不出来，
+            // 再等下去就是每帧白等一个 budget
+            if (current.tail && current.toPos(current.tail.orig) >= current.toPos(orig)) return;
+
             if (performance.now() >= deadline) return;
 
             // 重新定位一次：这一轮 await 期间可能换了方向或者重定位过
