@@ -74,7 +74,16 @@ export class DemoSession {
             document.fonts.load("64px phigros"),
         ]);
         const respack = await Respack.loadFromPhira(async name => {
-            return await fetch(`./default/${name}`).then(r => r.blob());
+            const url = `./default/${name}`;
+            const response = await fetch(url);
+
+            // 404 的时候 fetch 不报错，拿到的是 HTML 错误页 —— 后面交给
+            // `createImageBitmap` 只会得到一个没头没脑的 img error 事件
+            if (!response.ok) {
+                throw new Error(`资源包缺文件：${url}（HTTP ${response.status}，页面地址 ${location.href}）`);
+            }
+
+            return await response.blob();
         });
         const audioProcessor = new AudioProcessor();
         await audioProcessor.init({

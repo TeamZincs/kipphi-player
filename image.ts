@@ -47,9 +47,12 @@ export class Images {
     static async loadImage(src: ImageSource) {
         src = src instanceof Blob ? URL.createObjectURL(src) : src;
         const img = new Image();
+
         return await new Promise<HTMLImageElement>((resolve, reject) => {
             img.onload = () => resolve(img);
-            img.onerror = reject;
+            // 直接把 Event 丢出去的话，上层 `error.message` 是 undefined，
+            // 只会看到「初始化失败：undefined」，根本不知道是哪张图、什么地址
+            img.onerror = () => reject(new Error(`图片加载失败：${img.src}`));
             img.src = src;
         });
     }
