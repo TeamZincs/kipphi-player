@@ -173,6 +173,29 @@ class DirStream {
         return this.pinned.includes(node);
     }
 
+    /** 等「下一帧解出来」的挂起者 */
+    private waiters: (() => void)[] = [];
+
+    /**
+     * 等新的一帧解出来（谁先到算谁）
+     *
+     * 比 `sleep(0)` 轮询快得多：定时器嵌套几层之后会被钳到 4ms，
+     * 一帧等两轮就是 8ms —— 录制端一秒钟只能推十几帧，一半时间花在这上面。
+     */
+    onFrame(): Promise<void> {
+        return new Promise<void>(resolve => { this.waiters.push(resolve); });
+    }
+
+    private notifyFrame() {
+        if (this.waiters.length === 0) return;
+
+        const waiting = this.waiters;
+
+        this.waiters = [];
+
+        for (const resolve of waiting) resolve();
+    }
+
     /**
      * 是否需要重新定位。
      * 以「已解出的最新一帧」为基准判断：目标在它之后就继续往前解；
@@ -246,6 +269,7 @@ class DirStream {
         this.tail = node;
         this.count++;
         this.trim();
+        this.notifyFrame();
     }
 
     /** 只保留 window 帧：从头部（流内最旧）丢 */
@@ -767,6 +791,17 @@ export class VideoRenderingSource {
     }
 
     /**
+     * 等整段转码（含反向流）结束
+     *
+     * 录制 / 离线渲染前值得先等一下：转码自己占一个解码器 + 两个编码器，
+     * 和录制抢的话两边都慢（实测后台渲染只剩十几帧）。
+     */
+    async ready(): Promise<void> {
+        if (this.transcoding) await this.transcoding;
+        else await this.readyPromise;
+    }
+
+    /**
      * 等后台解码把 `time`（秒）那一帧解出来
      *
      * 解码是异步的，而取帧是同步的：不等的话 `getFrame` 只能给到「已经解出来的帧」，
@@ -804,7 +839,8 @@ export class VideoRenderingSource {
             // 重新定位一次：这一轮 await 期间可能换了方向或者重定位过
             this.getFrame(time);
 
-            await sleep(0);
+            // 等下一帧解出来（不是睡固定时间：定时器会被钳到 4ms，白等）
+            await Promise.race([current.onFrame(), sleep(8)]);
         }
     }
 

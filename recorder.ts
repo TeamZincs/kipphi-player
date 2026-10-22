@@ -264,8 +264,20 @@ export async function recordPlayer(player: Player, options: RecordOptions = {}):
     const previousRenderingOffset = renderer.renderingOffset;
     renderer.renderingOffset = 0;
 
+    // 背景视频的转码自己占一个解码器 + 两个编码器，和录制抢的话两边都慢
+    // （实测后台渲染只剩十几帧）。录制把音频、编码器都准备好了，这里等它转完再开跑。
+    const videos = [...renderer.videoMapping.values()];
+
+    if (videos.length > 0) {
+        console.info(`[recorder] 等 ${videos.length} 个背景视频转码完成…`);
+        await Promise.all(videos.map(video => video.ready()));
+    }
+
     // 主动让出的节奏：~1 帧一次，够浏览器插一帧绘制
     let lastYield = performance.now();
+    /** 花在等背景视频解码上的时间（排查「录制只有十几帧」用） */
+    let videoWait = 0;
+    const loopStartedAt = performance.now();
 
     try {
         for (let i = 0; i < totalFrames; i++) {
@@ -278,7 +290,11 @@ export async function recordPlayer(player: Player, options: RecordOptions = {}):
 
             // 严格等背景视频解码跟上这一帧，不然取到的是还停在第一帧
             renderer.offlineTime = range[0] + i / fps;
+
+            const beforeVideo = performance.now();
+
             await renderer.prepareVideo();
+            videoWait += performance.now() - beforeVideo;
             renderer.render();
 
             const frame = new VideoFrame(canvas, {
@@ -308,6 +324,14 @@ export async function recordPlayer(player: Player, options: RecordOptions = {}):
         }
         await videoEncoder.flush();
         if (encodeError) throw encodeError;
+
+        // 一行诊断：录制吞吐到底卡在谁身上
+        const renderSeconds = (performance.now() - loopStartedAt) / 1000;
+
+        console.info(`[recorder] 渲染 ${totalFrames} 帧 / ${renderSeconds.toFixed(1)}s`
+            + ` = ${(totalFrames / Math.max(renderSeconds, 0.001)).toFixed(1)} fps`
+            + `（等背景视频解码 ${(videoWait / 1000).toFixed(1)}s，`
+            + `占 ${(videoWait / Math.max(renderSeconds * 1000, 1) * 100).toFixed(0)}%）`);
 
         // 4. 混音 + 编码音频（放在画面之后：打击音是渲染过程中收集的）
         let audioCodec: string | null = null;
