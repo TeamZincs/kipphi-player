@@ -325,15 +325,16 @@ location.href = URL.createObjectURL(blob);
 视频是转码成两条小 GOP 的流后台解码的，而取帧是同步的。不提前等的话，那一帧只能拿到
 「已经解出来的帧」—— 通常就是第一帧，背景视频看着像卡住。
 
-`Player.create(..., { strictVideoSync })` 控制**播放循环**要不要严格等（默认 `true`）：
+`Player.create(..., { strictVideoSync })` 控制**播放循环**要不要严格等（默认 `false`）：
 
 ```typescript
 const player = await Player.create(canvas, audio, bg, respack, { strictVideoSync: true });
 ```
 
-- 开了：每帧先 `await player.prepareVideo()` 再 `render()`。等的时间有上限（默认 100ms），
-  转码还没追上的话先用现有的帧，卡一帧比整帧不画好
-- 关了：直接 `render()`，最低延迟，但视频可能落后几帧甚至停在前几帧
+- 开了：每帧先 `await player.prepareVideo()` 再 `render()`。等的时间有上限（默认 50ms），
+  追不上就先用现有的帧
+- 关了（默认）：直接 `render()`。实时预览只要"尽快画出来"，视频落后半帧没人看得出来；
+  开着的话**拖进度条会明显变迟钝**——位置一直在变，解码永远追不上，每帧都要等满预算
 - **`render()` 本身是同步的**；自己写循环（录制、Node 端）就每帧 `await player.prepareVideo()` 再 `render()`
 - 没有背景视频时这一步几乎不花钱（一个 `has()` 就返回）
 

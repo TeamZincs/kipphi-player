@@ -618,16 +618,15 @@ export interface PlayerOptions {
     /** GPU 图层的 z 范围，默认 `[0, 10]` */
     zRange?: [number, number];
     /**
-     * 播放时是否**严格等背景视频解码**，默认 `true`
+     * 播放时是否**严格等背景视频解码**，默认 `false`
      *
-     * 解码是异步的，而 {@linkcode Player.render} 是同步的：不等的话那一帧只能拿
-     * 「已经解出来的帧」，常常就是第一帧 —— 背景视频看着像卡住。
+     * 开了之后播放循环每帧先 `await prepareVideo()` 再画。代价很直接：
+     * 拖进度条、暂停后逐帧看的时候，位置一直在变，解码永远追不上，于是每帧都要
+     * 等满预算 —— 手感会明显变迟钝（实测拖条从跟手变成一卡一卡）。
      *
-     * 开了这一项，播放循环每帧会先等视频跟上再画（等的时间有上限，追不上就先用
-     * 现有的帧，卡一帧比整帧不画好）。关心最低延迟、或者根本没有背景视频的话可以关掉。
-     *
-     * 注意这只影响**播放循环**：{@linkcode Player.prepareVideo} 任何时候都能手动调，
-     * 录制端就是这么用的。
+     * 所以默认关掉：实时预播放只要「尽快画出来」就够了，视频落后半帧没人看得出来。
+     * 需要每帧都对得上（录制、导出）就走 {@linkcode Player.prepareVideo} 手动等，
+     * 录制端本来就是这么干的。
      */
     strictVideoSync?: boolean;
 }
@@ -822,9 +821,9 @@ export class Player extends EventTarget {
     /**
      * 播放循环里是否严格等背景视频解码，见 {@linkcode PlayerOptions.strictVideoSync}
      *
-     * 由 `create()` 的选项决定，之后也能直接改。
+     * 默认关：开着的话拖进度条会明显变迟钝。由 `create()` 的选项决定，之后也能直接改。
      */
-    strictVideoSync = true;
+    strictVideoSync = false;
 
     heightRatio: number;
 
@@ -876,8 +875,8 @@ export class Player extends EventTarget {
 
         // #default
         this.gpu = options.gpu ?? null;
-        // 严格等视频解码：见 PlayerOptions.strictVideoSync
-        this.strictVideoSync = options.strictVideoSync ?? true;
+        // 严格等视频解码：见 PlayerOptions.strictVideoSync（默认关，开着拖条会迟钝）
+        this.strictVideoSync = options.strictVideoSync ?? false;
         // #enddefault
 
         if (this.gpu) {

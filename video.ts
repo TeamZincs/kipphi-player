@@ -29,18 +29,11 @@ function absoluteWasmPath(path: string) {
 
 const US = 1e-6;
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
-/**
- * 交出去之后还要留几帧不关
- *
- * GPU 后端下 `drawImage(frame)` 只是排队上传，真正采样要等 GPU 排到；
- * 这段时间里那一帧不能被 `trim` close 掉，否则上传拿到已销毁的帧，
- * 画面就停在那一帧不动了。
- */
-const PINNED = 3;
+
 /** 转码多久没有任何新帧就算卡住（毫秒） */
 const STALL_MS = 5000;
 /** 回放解码队列满着、多久没有任何新帧就判定解码器死了（毫秒） */
-const DECODER_STALL_MS = 1500;
+const DECODER_STALL_MS = 2000;
 
 /**
  * 转码队列：同一时刻只转一条视频
@@ -118,9 +111,9 @@ class DirStream {
         private readonly config: VideoDecoderConfig,
         private readonly onError: (e: Error) => void
     ) {
-        // 至少往前喂满一个窗口：喂得比窗口浅的话，解码稍慢一点链表里就没有
-        // 当前帧，`prepare` 每次都得等到超时（实测每帧卡 100ms）
-        this.lookahead = Math.max(2, window);
+        // 往前喂半个窗口就够了：喂得越深，每次重定位（拖进度条）要解的帧越多，
+        // 手感越迟钝；而吞吐量只取决于解码器本身，喂得多并不会更快
+        this.lookahead = Math.max(2, Math.floor(window / 2));
         this.decoder = new VideoDecoder({
             output: frame => this.receive(frame),
             error: e => this.onError(e instanceof Error ? e : new Error(String(e)))
@@ -144,7 +137,13 @@ class DirStream {
         return false;
     }
 
-    /** 取最接近 orig 的那一帧 */
+    /**
+     * 取最接近 orig 的那一帧
+     *
+     * 交出去的是**链表里那个 VideoFrame 本身**，不 close、也不克隆：
+     * 画的地方（`drawImage` / `texImage2D` / `copyExternalImageToTexture`）
+     * 都是在调用那一刻就把画面快照走了，返回之后这一帧就可以回收。
+     */
     take(orig: number): VideoFrame | null {
         let best: FrameNode | null = null;
         let bestDelta = Infinity;
@@ -155,29 +154,7 @@ class DirStream {
                 best = n;
             }
         }
-        this.pin(best);
         return best ? best.val : null;
-    }
-
-    /**
-     * 最近交出去过的几帧
-     *
-     * GPU 后端下 `drawImage(frame)` 只是**排队上传**，真正采样要等 GPU 那边排到。
-     * 如果 trim 顺手把这一帧 close 掉，上传拿到的是个已销毁的帧 ——
-     * 表现就是背景视频停在某一帧不动了。所以最近交出去的要留一会儿。
-     */
-    private readonly pinned: FrameNode[] = [];
-
-    private pin(node: FrameNode | null) {
-        if (!node) return;
-
-        this.pinned.push(node);
-
-        while (this.pinned.length > PINNED) this.pinned.shift();
-    }
-
-    private isPinned(node: FrameNode) {
-        return this.pinned.includes(node);
     }
 
     /** 等「下一帧解出来」的挂起者 */
@@ -325,12 +302,16 @@ class DirStream {
         this.notifyFrame();
     }
 
-    /** 只保留 window 帧：从头部（流内最旧）丢 */
+    /**
+     * 只保留 window 帧：从头部（流内最旧）丢
+     *
+     * **必须无条件下手**。以前留了个「最近交出去的几帧先别关」的名单，一旦名单里的人
+     * 正好是链表头，这里就 `break` 掉 —— 帧再也丢不出去，越堆越多，`has` / `take`
+     * 每次遍历整个链表，解码器也会因为 VideoFrame 一直没还给系统而停止出帧。
+     * 拖进度条时最明显：取到的「最接近的帧」恰好就是链表头。
+     */
     private trim() {
         while (this.count > this.window && this.head) {
-            // GPU 上传可能是异步的，最近交出去的帧不能立刻 close
-            if (this.isPinned(this.head)) break;
-
             const node = this.head;
             this.head = node.next;
             if (!this.head) this.tail = null;
@@ -347,8 +328,6 @@ class DirStream {
         }
         this.head = this.tail = null;
         this.count = 0;
-        // 链表都清了，pin 也没意义（被摘走的那些归另一条流，不归我们关）
-        this.pinned.length = 0;
     }
 
     /** 摘出新方向紧邻的那些帧（不 close，所有权转交） */
