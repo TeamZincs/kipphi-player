@@ -16,6 +16,7 @@
     let hasPack = $state(false);
     let busy = $state(false);
     let status = $state("正在准备资源…");
+    let full = $state(true);
     /** 秒；结束留空表示到曲末 */
     let startAt = $state("0");
     let endAt = $state("");
@@ -28,18 +29,12 @@
     let elapsed = $state(0);
 
     let startedAt = 0;
-    /** 时长预设；空 = 用下面自己填的范围 */
-    let limit = $state("30");
 
     /** 拿 [起, 止) 的秒数区间；止为 null 表示到曲末 */
     function recordRange(duration: number): [number, number | null] | null {
         const from = Number(startAt);
 
-        if (limit === "all") {
-            return [from, null];
-        }
-
-        const to = endAt === "" ? Number(limit) : Number(endAt);
+        const to = endAt === "" ? null : Number(endAt);
 
         if (!(from >= 0) || !(to > from) || !(from < duration)) {
             return null;
@@ -116,6 +111,11 @@
 
         if (frame === total || frame % 300 === 0) {
             log(`${(progress * 100).toFixed(0)}%  ${frame}/${total} 帧  ${speed.toFixed(1)} fps`);
+
+            // 背景视频到底什么状态：没转完 / 解不出来 / 取错帧，一看就知道
+            const video = pack ? [...pack.player.videoMapping.values()][0] : null;
+
+            if (video) log(`BGA ${JSON.stringify(video.debugState())}`);
         }
     }
 
@@ -163,18 +163,23 @@
 </script>
 
 <section class="bar">
-    <a href="/">播放器</a>
-    <input type="file" accept=".zip" onchange={pick} disabled={!ready || busy} />
+    <a href="/" style="color: #66ccff">播放器</a>
+</section>
 
-    <label>
-        预设
-        <select bind:value={limit} disabled={busy}>
-            <option value="10">前 10 秒</option>
-            <option value="30">前 30 秒</option>
-            <option value="all">整首</option>
-        </select>
-    </label>
+<main class="panel">
+    <p class="headline">{status}</p>
 
+    <p class="hint">带特效的谱请用「强制 WebGL 1」——特效只在 WebGL 1 后端跑，WebGPU 那套还没跟上。</p>
+    {#if ready}
+    <input type="file" accept=".zip,.pez" onchange={pick} disabled={busy} />
+    {/if}
+
+    {#if hasPack}
+    <input type="checkbox" bind:checked={full}>
+
+    {#if !full}
+    <div>
+    
     <label>
         起
         <input class="num" type="number" min="0" step="0.1" bind:value={startAt} disabled={busy} />
@@ -184,14 +189,15 @@
         止
         <input class="num" type="number" min="0" step="0.1" placeholder="留空 = 曲末" bind:value={endAt} disabled={busy} />
     </label>
-
+    </div>
+    {/if}
+    <div>
     <button onclick={() => void record("canvas")} disabled={!hasPack || busy}>录制（可见画布）</button>
     <button onclick={() => void record("offscreen")} disabled={!hasPack || busy}>后台录制</button>
     <button onclick={() => void record("offscreen", "webgl1")} disabled={!hasPack || busy}>后台录制（强制 WebGL 1）</button>
-</section>
+    </div>
 
-<main class="panel">
-    <p class="headline">{status}</p>
+    
 
     <div class="progress"><div class="fill" style="width: {(progress * 100).toFixed(1)}%"></div></div>
 
@@ -200,8 +206,8 @@
         <div><dt>速度</dt><dd>{speed.toFixed(1)} fps</dd></div>
         <div><dt>已用</dt><dd>{elapsed.toFixed(1)} s</dd></div>
     </dl>
-
-    <p class="hint">带特效的谱请用「强制 WebGL 1」——特效只在 GPU 后端跑，WebGPU 那套还没跟上。</p>
+    
+    {/if}
 
     {#if logs.length > 0}
         <ol class="logs">

@@ -791,6 +791,29 @@ export class VideoRenderingSource {
     }
 
     /**
+     * 当前解码状态（排查「背景视频不动」用）
+     *
+     * 直接打在录制日志里，一眼能看出是「没转完 / 解不出来 / 取错了帧」哪一种。
+     */
+    debugState() {
+        const stream = this.current;
+
+        return {
+            total: this.total,
+            frameTimes: this.frameTimes.length,
+            lastTs: +(this.frameTimes[this.frameTimes.length - 1] ?? 0).toFixed(2),
+            ask: this.lastOrig,
+            dir: this.direction,
+            list: stream ? `${stream.head?.orig ?? "-"}..${stream.tail?.orig ?? "-"}` : "-",
+            count: stream?.count ?? -1,
+            fed: stream?.fedUpTo ?? -1,
+            decoder: stream?.decoder.state ?? "-",
+            queue: stream?.decoder.decodeQueueSize ?? -1,
+            error: this.error ? String(this.error) : null
+        };
+    }
+
+    /**
      * 等整段转码（含反向流）结束
      *
      * 录制 / 离线渲染前值得先等一下：转码自己占一个解码器 + 两个编码器，
