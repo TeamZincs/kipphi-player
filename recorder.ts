@@ -276,7 +276,9 @@ export async function recordPlayer(player: Player, options: RecordOptions = {}):
                 throw encodeError;
             }
 
+            // 严格等背景视频解码跟上这一帧，不然取到的是还停在第一帧
             renderer.offlineTime = range[0] + i / fps;
+            await renderer.prepareVideo();
             renderer.render();
 
             const frame = new VideoFrame(canvas, {

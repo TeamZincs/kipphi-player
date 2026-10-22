@@ -617,6 +617,19 @@ export interface PlayerOptions {
     device?: unknown;
     /** GPU 图层的 z 范围，默认 `[0, 10]` */
     zRange?: [number, number];
+    /**
+     * 播放时是否**严格等背景视频解码**，默认 `true`
+     *
+     * 解码是异步的，而 {@linkcode Player.render} 是同步的：不等的话那一帧只能拿
+     * 「已经解出来的帧」，常常就是第一帧 —— 背景视频看着像卡住。
+     *
+     * 开了这一项，播放循环每帧会先等视频跟上再画（等的时间有上限，追不上就先用
+     * 现有的帧，卡一帧比整帧不画好）。关心最低延迟、或者根本没有背景视频的话可以关掉。
+     *
+     * 注意这只影响**播放循环**：{@linkcode Player.prepareVideo} 任何时候都能手动调，
+     * 录制端就是这么用的。
+     */
+    strictVideoSync?: boolean;
 }
 
 // #default
@@ -806,6 +819,13 @@ export class Player extends EventTarget {
      */
     hitEffectNoFollows = !__IS_BROWSER;
 
+    /**
+     * 播放循环里是否严格等背景视频解码，见 {@linkcode PlayerOptions.strictVideoSync}
+     *
+     * 由 `create()` 的选项决定，之后也能直接改。
+     */
+    strictVideoSync = true;
+
     heightRatio: number;
 
     
@@ -856,6 +876,8 @@ export class Player extends EventTarget {
 
         // #default
         this.gpu = options.gpu ?? null;
+        // 严格等视频解码：见 PlayerOptions.strictVideoSync
+        this.strictVideoSync = options.strictVideoSync ?? true;
         // #enddefault
 
         if (this.gpu) {
@@ -1106,6 +1128,56 @@ export class Player extends EventTarget {
         this.currentCombo = combo;
     }
     private map: Map<string, JudgeLine[]>; 
+    /**
+     * 当前这一刻在放哪个背景视频
+     *
+     * @returns 视频源，以及它在**视频自己**时间轴上的位置（秒）
+     */
+    private videoAt(
+        renderingBeats: number,
+        renderingTime: number
+    ): { source: VideoFrameSource; time: number } | null {
+        const chart = this.chart;
+
+        if (!chart?.video) return null;
+
+        const node = chart.video.name.getNodeAt(renderingBeats);
+        const name = node.value?.trim();
+
+        if (!name) return null;
+
+        const source = this.videoMapping.get(name);
+
+        if (!source) return null;
+
+        return { source, time: renderingTime - chart.timeCalculator.toSeconds(TC.toBeats(node.time)) };
+    }
+
+    /**
+     * 等背景视频把 `time` 那一帧解出来
+     *
+     * 解码是异步的，而 {@linkcode render} 是同步的：不等的话那一帧只能拿到
+     * 「已经解出来的帧」，常常就是第一帧 —— 背景视频看着像卡住了。
+     *
+     * - 播放循环在 `strictVideoSync` 下每帧都会调
+     * - 录制端每帧手动调（`await player.prepareVideo()`）
+     * - 没有背景视频、或者已经解好时立刻返回，几乎不花钱
+     *
+     * @param time 谱面时间轴上的秒数，缺省当前渲染时刻
+     */
+    async prepareVideo(time: number = this.renderingTime): Promise<void> {
+        const chart = this.chart;
+
+        if (!chart) return;
+
+        const found = this.videoAt(chart.timeCalculator.secondsToBeats(time), time);
+
+        if (!found) return;
+
+        await found.source.prepare(found.time);
+    }
+
+    /** 画一帧（同步）。背景视频要提前用 {@linkcode prepareVideo} 等解码 */
     render() {
         if (!ENABLE_PLAYER) {
             return;
@@ -1142,6 +1214,7 @@ export class Player extends EventTarget {
         context.fillStyle = "#0008";
         context.fillRect(-27000, -18000, 54000, 36000);
 
+        // 注意这里是同步的：视频帧要在这之前用 prepareVideo() 等好
         (() => {
             if (!chart.video) {
                 return;
@@ -1158,7 +1231,8 @@ export class Player extends EventTarget {
                 return;
             }
             const videoEle = this.videoMapping.get(name);
-            const fr = videoEle.getFrame(renderingTime - timeCalculator.toSeconds(TC.toBeats(videoNode.time)));
+            const videoTime = renderingTime - timeCalculator.toSeconds(TC.toBeats(videoNode.time));
+            const fr = videoEle.getFrame(videoTime);
             if (!fr) {
                 return;
             }
@@ -2185,11 +2259,13 @@ export class Player extends EventTarget {
         if (!this.playing) {
             return;
         }
-        // console.log("anifr")
+        // 严格模式：先等视频解码跟上这一帧再画；等多久有上限，追不上就先用现有的帧
         requestAnimationFrame(() => {
-            // console.log("render")
-            this.render();
-            this.update();
+            const frame = this.strictVideoSync
+                ? this.prepareVideo().then(() => this.render())
+                : Promise.resolve(this.render());
+
+            frame.catch(error => console.error("[Player] 渲染失败", error)).finally(() => this.update());
         })
         this.lastBeats = this.beats
     }

@@ -29,6 +29,14 @@ function absoluteWasmPath(path: string) {
 
 const US = 1e-6;
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+/**
+ * 交出去之后还要留几帧不关
+ *
+ * GPU 后端下 `drawImage(frame)` 只是排队上传，真正采样要等 GPU 排到；
+ * 这段时间里那一帧不能被 `trim` close 掉，否则上传拿到已销毁的帧，
+ * 画面就停在那一帧不动了。
+ */
+const PINNED = 3;
 const clamp = (x: number, l: number, r: number) => x < l ? l : x > r ? r : x;
 
 export interface VideoSourceOptions {
@@ -128,7 +136,29 @@ class DirStream {
                 best = n;
             }
         }
+        this.pin(best);
         return best ? best.val : null;
+    }
+
+    /**
+     * 最近交出去过的几帧
+     *
+     * GPU 后端下 `drawImage(frame)` 只是**排队上传**，真正采样要等 GPU 那边排到。
+     * 如果 trim 顺手把这一帧 close 掉，上传拿到的是个已销毁的帧 ——
+     * 表现就是背景视频停在某一帧不动了。所以最近交出去的要留一会儿。
+     */
+    private readonly pinned: FrameNode[] = [];
+
+    private pin(node: FrameNode | null) {
+        if (!node) return;
+
+        this.pinned.push(node);
+
+        while (this.pinned.length > PINNED) this.pinned.shift();
+    }
+
+    private isPinned(node: FrameNode) {
+        return this.pinned.includes(node);
     }
 
     /**
@@ -207,6 +237,9 @@ class DirStream {
     /** 只保留 window 帧：从头部（流内最旧）丢 */
     private trim() {
         while (this.count > this.window && this.head) {
+            // GPU 上传可能是异步的，最近交出去的帧不能立刻 close
+            if (this.isPinned(this.head)) break;
+
             const node = this.head;
             this.head = node.next;
             if (!this.head) this.tail = null;
@@ -223,6 +256,8 @@ class DirStream {
         }
         this.head = this.tail = null;
         this.count = 0;
+        // 链表都清了，pin 也没意义（被摘走的那些归另一条流，不归我们关）
+        this.pinned.length = 0;
     }
 
     /** 摘出新方向紧邻的那些帧（不 close，所有权转交） */
@@ -355,15 +390,22 @@ export class VideoRenderingSource {
         await this.readyPromise;
         if (this.error) throw this.error;
 
+        // 回放解码一旦出错，getFrame 就永远返回 null，画面会停在最后一帧 ——
+        // 所以这里必须留个声响，不然只能看到"背景视频卡住"这种表象
+        const onReplayError = (e: Error) => {
+            console.error("[video] 回放解码失败，背景视频会停在当前帧:", e);
+            this.error = e;
+        };
+
         this.forward = new DirStream(false, this.forwardChunks, this.total, this.gop, this.fps,
-            this.window, this.replayConfig!, e => this.error = e);
+            this.window, this.replayConfig!, onReplayError);
         this.current = this.forward;
 
         // 整段转完后补上反向流（它的开头来自最后一个 GOP，必须等转完）
         this.transcoding = done.then(({ backward }) => {
             if (this.destroyed) return;
             this.backward = new DirStream(true, backward, this.total, this.gop, this.fps,
-                this.window, this.replayConfig!, e => this.error = e);
+                this.window, this.replayConfig!, onReplayError);
             this.onProgress?.(1, "reverse-ready");
         }).catch(() => { }); // 错误已经由上面的 done.catch 处理了
     }
@@ -583,10 +625,36 @@ export class VideoRenderingSource {
         return stream.take(orig);
     }
 
-    /** 让出事件循环，等后台解码追上 */
-    async prepare(time: number): Promise<void> {
-        const orig = clamp(Math.round(time * this.fps), 0, Math.max(0, this.total - 1));
-        for (let i = 0; i < 64 && !this.current?.has(orig); i++) {
+    /**
+     * 等后台解码把 `time`（秒）那一帧解出来
+     *
+     * 解码是异步的，而取帧是同步的：不等的话 `getFrame` 只能给到「已经解出来的帧」，
+     * 通常是第一帧 —— 背景视频看着就像卡住了。所以渲染前先 await 这个。
+     *
+     * - `budget`：最多等多少毫秒。超时就拿着现有帧凑合，卡一帧比整帧不画好
+     * - 还没转到那一帧（转码还在追）时立刻返回，等也没用
+     */
+    async prepare(time: number, budget = 100): Promise<void> {
+        const stream = this.current;
+
+        if (this.error || !stream) return;
+
+        // 想要哪一帧（还没截到范围内）
+        const wanted = Math.round(time * this.fps);
+
+        // 转码还没转到这儿，等也等不到
+        if (wanted >= this.total) return;
+
+        const orig = clamp(wanted, 0, Math.max(0, this.total - 1));
+        const deadline = performance.now() + budget;
+
+        for (let i = 0; i < 512; i++) {
+            if (this.current?.has(orig)) return;
+            if (performance.now() >= deadline) return;
+
+            // 重新定位一次：这一轮 await 期间可能换了方向或者重定位过
+            this.getFrame(time);
+
             await sleep(0);
         }
     }
