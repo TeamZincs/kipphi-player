@@ -107,6 +107,11 @@ export class DemoSession {
             // 404 的时候 fetch 不报错，拿到的是 HTML 错误页 —— 后面交给
             // `createImageBitmap` 只会得到一个没头没脑的 img error 事件
             if (!response.ok) {
+                // 音效（click / flick / drag.ogg）是**可选**的：资源包里没有就用播放器
+                // 自己那几个 Tap.wav / Drag.wav / Flick.wav。给个空 Blob 让它过去，
+                // 别为了缺音效把整个初始化拖垮
+                if (/\.(ogg|mp3|wav)$/i.test(name)) return new Blob();
+
                 throw new Error(`资源包缺文件：${url}（HTTP ${response.status}，页面地址 ${location.href}）`);
             }
 
