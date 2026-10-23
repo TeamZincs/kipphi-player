@@ -166,7 +166,11 @@ export class DemoSession {
             video: async (name) => {
                 const file = findFile(name);
                 if (!file) throw new Error(`压缩包里没有这个视频: ${name}`);
-                return await VideoFrameSource.from(new File([file.buffer as ArrayBuffer], name));
+                // ?noreverse 不转反向流：只做预览的话能省一个编码器、转码快一截
+                return await VideoFrameSource.from(
+                    new File([file.buffer as ArrayBuffer], name),
+                    { reverse: !new URLSearchParams(location.search).has("noreverse") },
+                );
             },
             shader: async (path) => {
                 const file = findFile(path);

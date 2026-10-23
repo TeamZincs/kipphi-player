@@ -60,6 +60,16 @@ export interface VideoSourceOptions {
     codec?: string;
     /** 每个方向最多保留多少帧 @default 12 */
     bufferSize?: number;
+    /**
+     * 是否额外转一条**反向流**，默认 `true`
+     *
+     * 反向流只为「流畅倒放 / 把进度条往回拖」服务：它让反方向也变成顺序解码。
+     * 代价很实在 —— 多一个常驻编码器、转码量翻倍（大素材上加载慢一大截）。
+     *
+     * 只做实时播放（视频一直往前走、偶尔 seek 一下）的话关掉：
+     * 往回拖仍然能用，只是要从正向流的关键帧重新解（GOP 只有 10 帧，慢一点点）。
+     */
+    reverse?: boolean;
     /** 转码进度，percent 为 0~1 */
     onProgress?: (percent: number, stage: string) => void;
     /**
@@ -418,6 +428,8 @@ export class VideoRenderingSource {
     private markReady: () => void = () => { };
     private readonly readyPromise = new Promise<void>(resolve => { this.markReady = resolve; });
     private readonly readySeconds: number;
+    /** 要不要建反向流（见 {@link VideoSourceOptions.reverse}） */
+    private readonly buildReverse: boolean;
 
     private constructor(source: File | string, options: VideoSourceOptions = {}) {
         this.source = source;
@@ -428,6 +440,7 @@ export class VideoRenderingSource {
         this.bitrate = options.bitrate ?? 4_000_000;
         this.codec = options.codec ?? "";
         this.readySeconds = options.readySeconds ?? 10;
+        this.buildReverse = options.reverse ?? true;
         this.onProgress = options.onProgress;
         this.demuxer = new WebDemuxer({
             wasmFilePath: wasmPath === undefined ? undefined : absoluteWasmPath(wasmPath)
@@ -483,7 +496,8 @@ export class VideoRenderingSource {
         // 整段转完后只把反向流的 chunk 留着，等真的需要倒放时再建解码器
         this.transcoding = done.then(({ backward }) => {
             if (this.destroyed) return;
-            this.backwardChunks = backward;
+            // 关掉反向流时这里是空数组：留 null，别建用不上的解码器
+            this.backwardChunks = backward.length > 0 ? backward : null;
             this.onProgress?.(1, "reverse-ready");
         }).catch(() => { }); // 错误已经由上面的 done.catch 处理了
     }
@@ -585,9 +599,11 @@ export class VideoRenderingSource {
         let estimated = Math.max(1, Math.round(this.duration * fps));
 
         const pushReverseGop = () => {
-            // 倒序编码：最后一个帧做关键帧，其余做 P 帧
-            for (let i = gopBuffer.length - 1; i >= 0; i--) {
-                reverseEncoder.encode(gopBuffer[i]!, { keyFrame: i === gopBuffer.length - 1 });
+            // 倒序编码：最后一个帧做关键帧，其余做 P 帧（不建反向流的话直接丢掉）
+            if (reverseEncoder) {
+                for (let i = gopBuffer.length - 1; i >= 0; i--) {
+                    reverseEncoder.encode(gopBuffer[i]!, { keyFrame: i === gopBuffer.length - 1 });
+                }
             }
             for (const frame of gopBuffer) frame.close();
             gopBuffer = [];
@@ -604,17 +620,22 @@ export class VideoRenderingSource {
             },
             error: e => { this.error = e instanceof Error ? e : new Error(String(e)); }
         });
-        const reverseEncoder = new VideoEncoder({
-            output: chunk => {
-                const origIndex = Math.round(chunk.timestamp * US * fps);
-                const g = Math.floor(origIndex / gop);
-                while (reverseGops.length <= g) reverseGops.push([]);
-                reverseGops[g]!.push(chunk);
-            },
-            error: e => { this.error = e instanceof Error ? e : new Error(String(e)); }
-        });
+        // 反向流是可选的：它只为「流畅倒放 / 往回拖」服务，代价是多一个编码器、
+        // 多转一倍的量。只做实时预览的话关掉能省不少。
+        const reverseEncoder = this.buildReverse
+            ? new VideoEncoder({
+                output: chunk => {
+                    const origIndex = Math.round(chunk.timestamp * US * fps);
+                    const g = Math.floor(origIndex / gop);
+                    while (reverseGops.length <= g) reverseGops.push([]);
+                    reverseGops[g]!.push(chunk);
+                },
+                error: e => { this.error = e instanceof Error ? e : new Error(String(e)); }
+            })
+            : null;
+
         forwardEncoder.configure(encoderConfig);
-        reverseEncoder.configure(encoderConfig);
+        reverseEncoder?.configure(encoderConfig);
 
         const decoder = new VideoDecoder({
             output: source => {
@@ -647,7 +668,7 @@ export class VideoRenderingSource {
         // 只压解码器的话帧会堆在编码器队列里（每帧一张完整图像，几 GB 很轻松）
         const backlogged = () => decoder.decodeQueueSize > 8
             || forwardEncoder.encodeQueueSize > 12
-            || reverseEncoder.encodeQueueSize > 12;
+            || (reverseEncoder?.encodeQueueSize ?? 0) > 12;
 
         const startedAt = performance.now();
         const reader = this.demuxer.read("video", 0, this.duration || undefined).getReader();
@@ -676,7 +697,7 @@ export class VideoRenderingSource {
                 stalled = true;
                 console.warn(`[video] 转码卡住了（已解 ${index} 帧、到 ${(this.frameTimes[index - 1] ?? 0).toFixed(2)}s，`
                     + `容器说 ${this.duration.toFixed(2)}s；队列 解码=${decoder.decodeQueueSize}`
-                    + ` 正向=${forwardEncoder.encodeQueueSize} 反向=${reverseEncoder.encodeQueueSize}），`
+                    + ` 正向=${forwardEncoder.encodeQueueSize} 反向=${reverseEncoder?.encodeQueueSize ?? 0}），`
                     + `用已经转好的部分继续`);
                 wake?.();
             }
@@ -717,7 +738,7 @@ export class VideoRenderingSource {
 
         await settle(decoder.flush(), FLUSH_MS, "decoder.flush");
         await settle(forwardEncoder.flush(), FLUSH_MS, "forwardEncoder.flush");
-        await settle(reverseEncoder.flush(), FLUSH_MS, "reverseEncoder.flush");
+        if (reverseEncoder) await settle(reverseEncoder.flush(), FLUSH_MS, "reverseEncoder.flush");
         this.total = index;
         this.onProgress?.(1, "transcode");
         const seconds = (performance.now() - startedAt) / 1000;
@@ -729,7 +750,7 @@ export class VideoRenderingSource {
 
         decoder.close();
         forwardEncoder.close();
-        reverseEncoder.close();
+        reverseEncoder?.close();
 
         // 每个桶里是「该 GOP 的帧倒序」，把桶按 GOP 倒序拼起来，
         // 才是从最后一帧往前放的流
@@ -745,7 +766,7 @@ export class VideoRenderingSource {
 
         this.total = this.forwardChunks.length;
         this.markReady(); // 短视频（readyFrames = Infinity）全靠这里放行
-        return { backward: this.retimestamp(backwardChunks) };
+        return { backward: this.buildReverse ? this.retimestamp(backwardChunks) : [] };
     }
 
     /** 把 chunk 的时间戳按流内顺序重写成严格升序 */
