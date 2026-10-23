@@ -92,6 +92,17 @@ class DirStream {
     decoder: VideoDecoder;
     /** 被看门狗重建过几次（排查用） */
     restarts = 0;
+    /** 重新定位过几次（排查用；每次 reset 都会让解码器丢弃在途的帧） */
+    resets = 0;
+    /** 解码器交过来的帧数 / 我们关掉的帧数（排查泄漏用，两者应该基本相等） */
+    received = 0;
+    closed = 0;
+
+    /** 关掉一帧并计数 */
+    private kill(frame: VideoFrame) {
+        try { frame.close(); } catch { }
+        this.closed++;
+    }
     /** 上一次看到进展（喂进去 / 解出来）的时刻，判断解码器是不是卡死了 */
     private lastProgressAt = performance.now();
     private lastFed = -1;
@@ -108,6 +119,16 @@ class DirStream {
     /** 预解码的前瞻帧数 */
     readonly lookahead: number;
 
+    /**
+     * 链表里最多留几帧
+     *
+     * `VideoFrame` 占着解码器的输出纹理。我们攥得越多，解码器能用的空闲纹理越少；
+     * 录制时编码器还要一份，池子一下就见底 —— 解码器于是不再吐帧（队列满着、
+     * 状态还是 configured），表现就是"放几帧 → 卡住 → 重建后又放几帧"。
+     * 渲染只需要"当前这一帧 + 一点余量"，12 帧纯属浪费。
+     */
+    readonly retain: number;
+
     constructor(
         readonly reverse: boolean,
         readonly chunks: EncodedVideoChunk[],
@@ -121,6 +142,8 @@ class DirStream {
         // 往前喂半个窗口就够了：喂得越深，每次重定位（拖进度条）要解的帧越多，
         // 手感越迟钝；而吞吐量只取决于解码器本身，喂得多并不会更快
         this.lookahead = Math.max(2, Math.floor(window / 2));
+        // 链表只留「前瞻 + 余量」：留着不关的每一帧都占着解码器的输出纹理
+        this.retain = Math.max(4, this.lookahead + 3);
         this.decoder = new VideoDecoder({
             output: frame => this.receive(frame),
             error: e => this.onError(e instanceof Error ? e : new Error(String(e)))
@@ -168,23 +191,40 @@ class DirStream {
     private waiters: (() => void)[] = [];
 
     /**
-     * 等新的一帧解出来（谁先到算谁）
+     * 等新的一帧解出来，最多等 `ms` 毫秒
      *
-     * 比 `sleep(0)` 轮询快得多：定时器嵌套几层之后会被钳到 4ms，
-     * 一帧等两轮就是 8ms —— 录制端一秒钟只能推十几帧，一半时间花在这上面。
+     * 比 `sleep(0)` 轮询快：定时器嵌套几层之后会被钳到 4ms。
+     *
+     * **超时必须把自己从名单里摘掉**。以前是 `Promise.race([onFrame(), sleep(8)])`，
+     * 走 sleep 那条路时待命者永远留在数组里 —— 录制一千多帧就堆上万，
+     * 之后每解出一帧都要把它们全部跑一遍，主线程整个垮掉，
+     * 解码器的 output 回调更是排不上队（表现就是"解码器卡住"）。
      */
-    onFrame(): Promise<void> {
-        return new Promise<void>(resolve => { this.waiters.push(resolve); });
+    waitFrame(ms: number): Promise<void> {
+        return new Promise<void>(resolve => {
+            let settled = false;
+
+            const finish = () => {
+                if (settled) return;
+                settled = true;
+
+                const index = this.waiters.indexOf(finish);
+
+                if (index >= 0) this.waiters.splice(index, 1);
+                clearTimeout(timer);
+                resolve();
+            };
+            const timer = setTimeout(finish, ms);
+
+            this.waiters.push(finish);
+        });
     }
 
     private notifyFrame() {
         if (this.waiters.length === 0) return;
 
-        const waiting = this.waiters;
-
-        this.waiters = [];
-
-        for (const resolve of waiting) resolve();
+        // 每个 finish 会把自己从名单里摘掉，先拷一份再遍历
+        for (const finish of [...this.waiters]) finish();
     }
 
     /**
@@ -209,6 +249,7 @@ class DirStream {
         for (let i = Math.min(pos, this.chunks.length - 1); i >= 0; i--) {
             if (this.chunks[i]!.type === "key") { start = i; break; }
         }
+        this.resets++;
         if (this.decoder.state !== "closed") this.decoder.reset();
         this.decoder.configure(this.config);
         this.fedUpTo = start;
@@ -268,8 +309,9 @@ class DirStream {
         let guard = 0;
         while (this.fedUpTo <= target && this.fedUpTo < this.chunks.length && guard++ < 128) {
             if (this.decoder.state !== "configured") break;
-            // 队列太深就停手：解出来的帧会排成一长队，画面反而更滞后
-            if (this.decoder.decodeQueueSize >= this.window) break;
+            // 队列太深就停手：排队的块解出来都得占一张输出纹理，
+            // 而链表只留 retain 帧，喂太多等于白白占着解码器的池子
+            if (this.decoder.decodeQueueSize >= this.retain) break;
             this.decoder.decode(this.chunks[this.fedUpTo++]!);
         }
     }
@@ -292,11 +334,13 @@ class DirStream {
     }
 
     private receive(frame: VideoFrame) {
+        this.received++;
+
         const pos = Math.round(frame.timestamp * US * this.fps);
         const orig = this.toOrig(pos);
         // 只挡负数：正向流的 total 是「已转码的帧数」，会一直涨，不能拿它当上界
         if (orig < 0 || this.has(orig)) {
-            frame.close();
+            this.kill(frame);
             return;
         }
         this.pendingReset = false;
@@ -319,11 +363,11 @@ class DirStream {
      * 拖进度条时最明显：取到的「最接近的帧」恰好就是链表头。
      */
     private trim() {
-        while (this.count > this.window && this.head) {
+        while (this.count > this.retain && this.head) {
             const node = this.head;
             this.head = node.next;
             if (!this.head) this.tail = null;
-            node.val.close();
+            this.kill(node.val);
             this.count--;
         }
     }
@@ -331,7 +375,7 @@ class DirStream {
     dropAll() {
         for (let n = this.head; n;) {
             const next = n.next;
-            n.val.close();
+            this.kill(n.val);
             n = next;
         }
         this.head = this.tail = null;
@@ -363,7 +407,8 @@ class DirStream {
 
     close() {
         this.dropAll();
-        try { this.first?.close(); } catch { }
+
+        if (this.first) this.kill(this.first);
         this.first = null;
         if (this.decoder.state !== "closed") this.decoder.close();
     }
@@ -887,6 +932,10 @@ export class VideoRenderingSource {
             decoder: stream?.decoder.state ?? "-",
             queue: stream?.decoder.decodeQueueSize ?? -1,
             restarts: stream?.restarts ?? -1,
+            resets: stream?.resets ?? -1,
+            // 解码器交过来多少帧、我们关掉多少帧；两者差得远就是泄漏
+            received: stream?.received ?? -1,
+            closed: stream?.closed ?? -1,
             error: this.error ? String(this.error) : null
         };
     }
@@ -945,7 +994,7 @@ export class VideoRenderingSource {
             this.getFrame(time);
 
             // 等下一帧解出来（不是睡固定时间：定时器会被钳到 4ms，白等）
-            await Promise.race([current.onFrame(), sleep(8)]);
+            await current.waitFrame(8);
         }
     }
 
