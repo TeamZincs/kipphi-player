@@ -2,3 +2,8 @@ node_modules
 dist
 *.local
 .DS_Store
+
+# 多页模式生成的入口（@graints/vite-plugin 每次构建重写）
+index.html
+*/index.html
+**/__grain-page.ts
