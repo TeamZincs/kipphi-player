@@ -5,20 +5,20 @@
     "": {
       "name": "demo",
       "dependencies": {
-        "@graints/runtime": "^0.4.1",
+        "@graints/runtime": "^0.4.2",
         "jszip": "3.10.1",
       },
       "devDependencies": {
-        "@graints/vite-plugin": "^0.4.1",
+        "@graints/vite-plugin": "^0.4.2",
         "typescript": "^6.0.3",
         "vite": "^8.3.2",
       },
     },
   },
   "packages": {
-    "@graints/runtime": ["@graints/runtime@0.4.1", "", {}, "sha512-okz4qZ53rdFSennl2YNczJ0QB4FLVvuzSyuCh4rZLh5roZRrDradZDFt7KMPnKBzSHdyMuJ6vPxF1+xkhkaQRA=="],
+    "@graints/runtime": ["@graints/runtime@0.4.2", "", {}, "sha512-DJQcm5gEjPigsZyGb75z5I247ID4mGm9RidaL+l62zXjy86rZNPTbmCMszSmR+/EKOy7Oikp1NJ0C3MTwnIE5g=="],
 
-    "@graints/vite-plugin": ["@graints/vite-plugin@0.4.1", "", { "dependencies": { "@typescript-eslint/typescript-estree": "^8.71.0", "css-tree": "^3.2.1", "typescript": ">=5.0.0 <7.0.0" }, "peerDependencies": { "vite": ">=6" } }, "sha512-1hWZJOsFPaCdpqi+1aJKQIELR7Fz5zuj+K/jSxk1WXeWz35rd2iTeCQGr7mYnj9A3E36k8lsUmdCqTKZScCN1A=="],
+    "@graints/vite-plugin": ["@graints/vite-plugin@0.4.2", "", { "dependencies": { "@typescript-eslint/typescript-estree": "^8.71.0", "css-tree": "^3.2.1", "oxc-parser": "^0.153.0", "typescript": ">=5.0.0 <7.0.0" }, "peerDependencies": { "vite": ">=6" } }, "sha512-73Z623pc2n19eJ+PxzEyv/1vggM2Sl1lFAarqnmi5sPhvVogY0HrNFZJyuccn6s1ko9u+3WDeK8CsLcCqwxzaQ=="],
 
     "@oxc-project/types": ["@oxc-project/types@0.155.0", "", {}, "sha512-SeE8JPwW1xs1tHeNycjUtUBdhorRa8o4jlvjwk49R7/Z291i+4DQa7JJIgOm/TaYQZx+QrPQbVJ/9c8dMIZN8Q=="],
 
