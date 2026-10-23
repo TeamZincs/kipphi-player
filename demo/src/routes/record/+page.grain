@@ -3,14 +3,17 @@
         downloadResult,
         getSession,
         type DemoSession,
-        type LoadedPack,
+        type PreparedPack,
     } from "../../session";
     import type { RendererPreference } from "../..";
 
     let session: DemoSession | null = null;
-    let pack: LoadedPack | null = null;
+    /** 只解了包、还没建播放器（点按钮时才知道要哪个后端） */
+    let prepared: PreparedPack | null = null;
     /** 这一页不展示画面：播放器画在一块藏起来的 canvas 上 */
     let canvasEl: HTMLCanvasElement | null = null;
+    /** 站内链接按 base 拼（多页模式下地址带目录） */
+    const homeHref = import.meta.env.BASE_URL;
 
     let ready = $state(false);
     let hasPack = $state(false);
@@ -79,12 +82,13 @@
         status = "正在解压…";
         log(`载入 ${file.name}`);
         try {
-            // 这个页面只用来录制：画布藏在视口外，没人会拖它的进度条，
-            // 所以视频直接走直通（不重编码），省掉一整轮转码和编码器占用
-            pack = await session.load(canvasEl, file, log, { sequential: true });
+            // 只解包、不建播放器：这个页面是用来录制的，用户点了按钮才知道要哪个后端
+            //
+            // sequential：视频走直通（不重编码），省掉一整轮转码和编码器占用
+            prepared = await session.load(file, log, { sequential: true });
             hasPack = true;
             status = "选个时长，然后录";
-            log(`谱面就绪：${pack.duration.toFixed(1)}s，后端 ${pack.player.rendererName}`);
+            log(`谱面就绪：${prepared.duration.toFixed(1)}s（点按钮时再建播放器）`);
         } catch (error) {
             console.error(error);
             status = `加载失败：${(error as Error).message}`;
@@ -113,17 +117,12 @@
 
         if (frame === total || frame % 300 === 0) {
             log(`${(progress * 100).toFixed(0)}%  ${frame}/${total} 帧  ${speed.toFixed(1)} fps`);
-
-            // 背景视频到底什么状态：没转完 / 解不出来 / 取错帧，一看就知道
-            const video = pack ? [...pack.player.videoMapping.values()][0] : null;
-
-            if (video) log(`BGA ${JSON.stringify(video.debugState())}`);
         }
     }
 
     async function record(target: "canvas" | "offscreen", renderer?: RendererPreference) {
-        const current = pack;
-        if (!current || !session || busy) {
+        const current = prepared;
+        if (!current || !session || !canvasEl || busy) {
             return;
         }
 
@@ -165,7 +164,7 @@
 </script>
 
 <section class="bar">
-    <a href="/" style="color: #66ccff">播放器</a>
+    <a href={homeHref} style="color: #66ccff">播放器</a>
 </section>
 
 <main class="panel">

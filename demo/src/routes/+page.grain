@@ -5,6 +5,10 @@
     let pack: LoadedPack | null = null;
     let canvasEl: HTMLCanvasElement | null = null;
 
+    // 多页模式下地址带目录（`/kipphi-player/`、`/kipphi-player/record/`），
+    // 站内链接得按 base 拼，不能写相对的 `/record`
+    const recordHref = `${import.meta.env.BASE_URL}record/`;
+
     let ready = $state(false);
     let hasPack = $state(false);
     let busy = $state(false);
@@ -29,7 +33,9 @@
         busy = true;
         status = "正在解压…";
         try {
-            pack = await session.load(canvasEl, file);
+            // 预览页本来就马上要放，解完包直接建播放器
+            const prepared = await session.load(file);
+            pack = await session.play(prepared, canvasEl);
             hasPack = true;
             status = "好了，空格播放 / 暂停";
         } catch (error) {
@@ -43,7 +49,7 @@
 
 <section class="bar">
     <input type="file" accept=".zip" onchange={pick} disabled={!ready || busy} />
-    <a href="/record">去录制</a>
+    <a href={recordHref}>去录制</a>
     <span class="status">{status}</span>
 </section>
 

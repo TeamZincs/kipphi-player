@@ -20,6 +20,28 @@ export interface LoadedPack {
     duration: number;
 }
 
+/**
+ * 解包之后、**还没建播放器**的中间态
+ *
+ * 录制页只用来录，画布藏在视口外没人看，所以播放器没必要在选包时就建出来
+ * （建出来会挑一个后端、打印一行，点「录制」换后端时又打印一行，很容易让人以为
+ * 后端被改过）。选包只做到这一步，点按钮时再 {@linkcode DemoSession.play}。
+ */
+export interface PreparedPack {
+    chart: Chart;
+    background: ImageBitmap;
+    /** 已经加载好的 BGM 元素（播放器要用） */
+    audioElement: HTMLAudioElement;
+    /** BGM 原始字节，录制时直接给，省得再 fetch 一遍 */
+    audio: ArrayBuffer;
+    duration: number;
+    /** `?renderer=` 指定的后端，`play()` 没给就用它 */
+    renderer: RendererPreference;
+    showStats: boolean;
+    /** 谱面要求的所有贴图 / 视频 / 着色器都从这里取 */
+    adapter: Parameters<Player["use"]>[0];
+}
+
 /** 谱面里的资源路径可能带 `/`（自定义着色器就是 `/xxx.frag`）或 `./` 前缀，包内条目则不一定带 */
 const normalizePath = (path: string) => path.replace(/^(\.\/|\/)+/, "");
 
@@ -99,19 +121,17 @@ export class DemoSession {
         return new DemoSession(respack, audioProcessor);
     }
 
-    /** 解包 + 建播放器 */
     /**
-     * 解包 + 建播放器
+     * 解包 + 解析谱面（**不建播放器**，见 {@linkcode PreparedPack}）
      *
      * `sequential` 会跳过视频重编码（只 demux）：录制 / 离线导出用得上，
      * 预览不行 —— 往回拖进度条要靠重编码出来的小 GOP 才跟手。
      */
     async load(
-        canvas: HTMLCanvasElement,
         file: File,
-        log: (s: string) => void,
+        log: (s: string) => void = () => { },
         options: { sequential?: boolean } = {},
-    ): Promise<LoadedPack> {
+    ): Promise<PreparedPack> {
         const unzipped = await unzip(file);
         const findFile = (path: string) => {
             const target = normalizePath(path);
@@ -160,12 +180,59 @@ export class DemoSession {
             ? requested as RendererPreference
             : "auto";
 
-        // ?stats 打开帧率/帧时间覆盖层（离屏录制的播放器不带这个，免得录进画面）
-        const showStats = new URLSearchParams(location.search).has("stats");
-        const player = await Player.create(canvas, this.audioProcessor, audio, background, this.respack, {
+        return {
+            chart,
+            background,
+            audioElement: audio,
+            audio: audioFile.buffer.slice(0),
+            duration: chart.duration,
             renderer,
-            showStats,
-        });
+            // ?stats 打开帧率/帧时间覆盖层（离屏录制的播放器不带这个，免得录进画面）
+            showStats: new URLSearchParams(location.search).has("stats"),
+            adapter: {
+                texture: async (name) => {
+                    const file = findFile(name);
+                    return file ? await createImageBitmap(new Blob([file.buffer as ArrayBuffer])) : null;
+                },
+                video: async (name) => {
+                    const file = findFile(name);
+                    if (!file) throw new Error(`压缩包里没有这个视频: ${name}`);
+                    return await VideoFrameSource.from(
+                        new File([file.buffer as ArrayBuffer], name),
+                        { sequential: options.sequential ?? false },
+                    );
+                },
+                shader: async (path) => {
+                    const file = findFile(path);
+                    if (!file) {
+                        console.warn(`[demo] 压缩包里没有这个着色器: ${path}`);
+                        return null;
+                    }
+                    // 注册名必须和谱面里的 effect.shader 完全一致，所以用原始 path
+                    return { name: path, glsl: new TextDecoder().decode(file.buffer) };
+                },
+            },
+        };
+    }
+
+    /**
+     * 建播放器并把资源灌进去
+     *
+     * 录制页点按钮时才调 —— 那时才知道用户要哪个后端。
+     */
+    async play(
+        prepared: PreparedPack,
+        canvas: HTMLCanvasElement,
+        renderer?: RendererPreference,
+    ): Promise<LoadedPack> {
+        const player = await Player.create(
+            canvas,
+            this.audioProcessor,
+            prepared.audioElement,
+            prepared.background,
+            this.respack,
+            { renderer: renderer ?? prepared.renderer, showStats: prepared.showStats },
+        );
 
         console.log(`[demo] 渲染后端: ${player.rendererName}`);
         // 实时预览用的显示延迟补偿；录制时 recorder 会临时归零
@@ -174,54 +241,36 @@ export class DemoSession {
         player.showsRenderingBaseline = false;
         player.hitEffectNoFollows = true;
 
-        player.use({
-            texture: async (name) => {
-                const file = findFile(name);
-                return file ? await createImageBitmap(new Blob([file.buffer as ArrayBuffer])) : null;
-            },
-            video: async (name) => {
-                const file = findFile(name);
-                if (!file) throw new Error(`压缩包里没有这个视频: ${name}`);
-                return await VideoFrameSource.from(
-                    new File([file.buffer as ArrayBuffer], name),
-                    { sequential: options.sequential ?? false },
-                );
-            },
-            shader: async (path) => {
-                const file = findFile(path);
-                if (!file) {
-                    console.warn(`[demo] 压缩包里没有这个着色器: ${path}`);
-                    return null;
-                }
-                // 注册名必须和谱面里的 effect.shader 完全一致，所以用原始 path
-                return { name: path, glsl: new TextDecoder().decode(file.buffer) };
-            },
-        });
-        await player.receive(chart);
+        player.use(prepared.adapter);
+        await player.receive(prepared.chart);
 
-        return { player, audio: audioFile.buffer.slice(0), duration: chart.duration };
+        return { player, audio: prepared.audio, duration: prepared.duration };
     }
 
     /**
      * 录一段
      *
      * `range` 是秒数区间 `[起, 止)`；止为 `null` 或超出时长就到结尾。
-     * `renderer` 不给就跟着主播放器来（想强制 WebGL 1 就传 `"webgl1"`）。
+     * `renderer` 不给就用 `?renderer=`（或者 auto）—— 也就在这一刻才建播放器。
      */
     async record(
-        pack: LoadedPack,
+        pack: LoadedPack | PreparedPack,
+        canvas: HTMLCanvasElement,
         target: "canvas" | "offscreen",
         range: [number, number | null],
         onProgress: (frame: number, total: number) => void,
         renderer?: RendererPreference,
     ): Promise<RecordResult> {
         const end = range[1] === null ? pack.duration : Math.min(pack.duration, range[1]);
-        return await recordPlayer(pack.player, {
+        // 还没建播放器（录制页就是这样）就先建一个，后端按这次录制的要求来
+        const loaded = "player" in pack ? pack : await this.play(pack, canvas, renderer);
+
+        return await recordPlayer(loaded.player, {
             target,
             fps: 60,
             range: [range[0], end],
             renderer,
-            audio: { source: pack.audio },
+            audio: { source: loaded.audio },
             onProgress,
         });
     }
