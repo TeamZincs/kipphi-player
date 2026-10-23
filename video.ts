@@ -30,23 +30,18 @@ function absoluteWasmPath(path: string) {
 const US = 1e-6;
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
-/** 转码多久没有任何新帧就算卡住（毫秒） */
-const STALL_MS = 5000;
+/** flush 最多等多久（毫秒） */
+const FLUSH_MS = 5000;
 /**
- * 回放解码队列满着、多久没有任何新帧就判定解码器死了（毫秒）
+ * 转码多久没有任何新帧就算卡住（毫秒）
  *
- * 别调太小：解码器的 output 回调跑在主线程上，主线程被渲染/编码占住时它一样不吐帧，
- * 那只叫"没轮到我"，不叫死。太灵敏就会变成「卡两秒 → 重建 → 放几帧 → 又卡两秒」。
+ * 这里会**截断**转码（用已经转好的部分继续），所以给得很宽：
+ * 慢一点的机器上转 4K 素材，几秒不出帧是正常的。
  */
-const DECODER_STALL_MS = 3000;
+const TRANSCODE_STALL_MS = 15_000;
 
-/**
- * 转码队列：同一时刻只转一条视频
- *
- * 每条视频要占 1 个源解码器 + 2 个编码器（正向 / 反向），两条一起来就是 6 个硬件
- * 会话；实测（Designant.zip 的两条 BGA）会双双卡在十几二十秒处不动。
- */
-let transcodeQueue: Promise<unknown> = Promise.resolve();
+
+
 const clamp = (x: number, l: number, r: number) => x < l ? l : x > r ? r : x;
 
 export interface VideoSourceOptions {
@@ -89,9 +84,7 @@ interface FrameNode {
  */
 class DirStream {
     /** 卡住时会整个换掉，所以不是 readonly */
-    decoder: VideoDecoder;
-    /** 被看门狗重建过几次（排查用） */
-    restarts = 0;
+    readonly decoder: VideoDecoder;
     /** 重新定位过几次（排查用；每次 reset 都会让解码器丢弃在途的帧） */
     resets = 0;
     /** 解码器交过来的帧数 / 我们关掉的帧数（排查泄漏用，两者应该基本相等） */
@@ -103,10 +96,6 @@ class DirStream {
         try { frame.close(); } catch { }
         this.closed++;
     }
-    /** 上一次看到进展（喂进去 / 解出来）的时刻，判断解码器是不是卡死了 */
-    private lastProgressAt = performance.now();
-    private lastFed = -1;
-    private lastCount = -1;
     head: FrameNode | null = null;
     tail: FrameNode | null = null;
     count = 0;
@@ -256,55 +245,8 @@ class DirStream {
         this.pendingReset = true;
     }
 
-    /**
-     * 解码器卡死了就换一个
-     *
-     * 实测症状：`decoder.state` 还是 `configured`、队列一直满着（12），但再也不吐帧，
-     * 画面就定在开头几帧。`reset()` 救不回来（会话已经废了），只能 close 掉重建。
-     * 常见诱因是硬件解码会话数量超限 —— Chrome 对同时存在的 H.264 解码器有上限，
-     * 超出的那些不会报错，只是从此不出帧。
-     */
-    private checkStall(pos: number) {
-        // 喂进去的块数、解出来的帧数，任何一个在变就说明还活着
-        if (this.fedUpTo !== this.lastFed || this.count !== this.lastCount) {
-            this.lastFed = this.fedUpTo;
-            this.lastCount = this.count;
-            this.lastProgressAt = performance.now();
-
-            return;
-        }
-
-        // 队列没堵满，说明是我们在等位置，不算卡
-        if (this.decoder.decodeQueueSize < this.window) return;
-        if (performance.now() - this.lastProgressAt < DECODER_STALL_MS) return;
-
-        let start = 0;
-        for (let i = Math.min(pos, this.chunks.length - 1); i >= 0; i--) {
-            if (this.chunks[i]!.type === "key") { start = i; break; }
-        }
-
-        console.warn(`[video] 回放解码器卡住了（队列 ${this.decoder.decodeQueueSize}，`
-            + `已 ${((performance.now() - this.lastProgressAt) / 1000).toFixed(1)}s 没有进展），重建一个`);
-
-        this.restarts++;
-        try { this.decoder.close(); } catch { }
-
-        this.decoder = new VideoDecoder({
-            output: frame => this.receive(frame),
-            error: e => this.onError(e instanceof Error ? e : new Error(String(e)))
-        });
-        this.decoder.configure(this.config);
-        this.fedUpTo = start;
-        this.pendingReset = true;
-        this.lastProgressAt = performance.now();
-        this.lastFed = this.fedUpTo;
-        this.lastCount = this.count;
-    }
-
     /** 补帧到 pos（含前瞻） */
     ensure(pos: number) {
-        this.checkStall(pos);
-
         const target = Math.min(this.chunks.length - 1, pos + this.lookahead);
         let guard = 0;
         while (this.fedUpTo <= target && this.fedUpTo < this.chunks.length && guard++ < 128) {
@@ -516,11 +458,7 @@ export class VideoRenderingSource {
             ? Math.round(this.readySeconds * this.fps)
             : Infinity;
 
-        // 转码排队：一条视频要占「1 个源解码器 + 正向/反向 2 个编码器」，
-        // 两条视频同时开就是 6 个硬件会话，实测会把编码器池用光、双双卡死在半路
-        const done = transcodeQueue.then(() => this.transcode(sourceConfig));
-
-        transcodeQueue = done.catch(() => { });
+        const done = this.transcode(sourceConfig);
         done.catch(e => {
             // 转码失败也要放行，否则 init 永远挂着
             this.error = e instanceof Error ? e : new Error(String(e));
@@ -734,7 +672,7 @@ export class VideoRenderingSource {
 
                 return;
             }
-            if (performance.now() - lastProgressAt > STALL_MS && !stalled) {
+            if (performance.now() - lastProgressAt > TRANSCODE_STALL_MS && !stalled) {
                 stalled = true;
                 console.warn(`[video] 转码卡住了（已解 ${index} 帧、到 ${(this.frameTimes[index - 1] ?? 0).toFixed(2)}s，`
                     + `容器说 ${this.duration.toFixed(2)}s；队列 解码=${decoder.decodeQueueSize}`
@@ -777,9 +715,9 @@ export class VideoRenderingSource {
             }
         };
 
-        await settle(decoder.flush(), STALL_MS, "decoder.flush");
-        await settle(forwardEncoder.flush(), STALL_MS, "forwardEncoder.flush");
-        await settle(reverseEncoder.flush(), STALL_MS, "reverseEncoder.flush");
+        await settle(decoder.flush(), FLUSH_MS, "decoder.flush");
+        await settle(forwardEncoder.flush(), FLUSH_MS, "forwardEncoder.flush");
+        await settle(reverseEncoder.flush(), FLUSH_MS, "reverseEncoder.flush");
         this.total = index;
         this.onProgress?.(1, "transcode");
         const seconds = (performance.now() - startedAt) / 1000;
@@ -931,7 +869,6 @@ export class VideoRenderingSource {
             fed: stream?.fedUpTo ?? -1,
             decoder: stream?.decoder.state ?? "-",
             queue: stream?.decoder.decodeQueueSize ?? -1,
-            restarts: stream?.restarts ?? -1,
             resets: stream?.resets ?? -1,
             // 解码器交过来多少帧、我们关掉多少帧；两者差得远就是泄漏
             received: stream?.received ?? -1,
