@@ -70,6 +70,19 @@ export interface VideoSourceOptions {
      * 往回拖仍然能用，只是要从正向流的关键帧重新解（GOP 只有 10 帧，慢一点点）。
      */
     reverse?: boolean;
+    /**
+     * **不重编码**，直接按顺序解源流，默认 `false`
+     *
+     * 重编码换来的是「GOP 只有 10 帧」的随机访问能力，代价是 1 个源解码器 +
+     * 1~2 个编码器、以及一次完整的全片重编码。
+     *
+     * 录制 / 离线导出是**严格顺序、不回头**的渲染，随机访问一次都用不上，
+     * 那套重编码纯亏（还会和录制自己的编码器抢资源）。这种场景就开 `sequential`：
+     * demux 一遍把 chunk 收下来（不解码不编码，几百毫秒），播放时顺序解。
+     *
+     * 代价：往回拖 / 倒放要按**源视频自己的 GOP**重新定位，源 GOP 大的话会顿一下。
+     */
+    sequential?: boolean;
     /** 转码进度，percent 为 0~1 */
     onProgress?: (percent: number, stage: string) => void;
     /**
@@ -100,6 +113,8 @@ class DirStream {
     /** 解码器交过来的帧数 / 我们关掉的帧数（排查泄漏用，两者应该基本相等） */
     received = 0;
     closed = 0;
+    /** 直通模式下源时间戳是否单调递增（有 B 帧就不单调） */
+    ordered = true;
 
     /** 关掉一帧并计数 */
     private kill(frame: VideoFrame) {
@@ -136,7 +151,11 @@ class DirStream {
         readonly fps: number,
         readonly window: number,
         private readonly config: VideoDecoderConfig,
-        private readonly onError: (e: Error) => void
+        private readonly onError: (e: Error) => void,
+        /** 直通模式：帧号按解出来的顺序编号，时间戳记进 frameTimes */
+        private readonly bySequence = false,
+        /** 帧号 → 源时间戳（秒）；直通模式下由这里填 */
+        private readonly frameTimes: number[] = []
     ) {
         // 往前喂半个窗口就够了：喂得越深，每次重定位（拖进度条）要解的帧越多，
         // 手感越迟钝；而吞吐量只取决于解码器本身，喂得多并不会更快
@@ -288,8 +307,24 @@ class DirStream {
     private receive(frame: VideoFrame) {
         this.received++;
 
-        const pos = Math.round(frame.timestamp * US * this.fps);
-        const orig = this.toOrig(pos);
+        let orig: number;
+
+        if (this.bySequence) {
+            // 直通模式：源流的帧率可能标错或是 VFR，按「第几帧」编号最稳，
+            // 时间 → 帧号交给 frameTimes 二分查
+            const pts = frame.timestamp * US;
+            const last = this.frameTimes[this.frameTimes.length - 1];
+
+            // 有 B 帧时解码顺序 ≠ 显示顺序，时间戳就不单调，二分查会失效
+            if (last !== undefined && pts < last) this.ordered = false;
+
+            orig = this.frameTimes.length;
+            this.frameTimes.push(pts);
+        } else {
+            const pos = Math.round(frame.timestamp * US * this.fps);
+            orig = this.toOrig(pos);
+        }
+
         // 只挡负数：正向流的 total 是「已转码的帧数」，会一直涨，不能拿它当上界
         if (orig < 0 || this.has(orig)) {
             this.kill(frame);
@@ -430,6 +465,10 @@ export class VideoRenderingSource {
     private readonly readySeconds: number;
     /** 要不要建反向流（见 {@link VideoSourceOptions.reverse}） */
     private readonly buildReverse: boolean;
+    /** 直通模式：不重编码，顺序解源流（见 {@link VideoSourceOptions.sequential}） */
+    private readonly sequential: boolean;
+    /** 直通模式收下来的源流 chunk */
+    private readonly sourceChunks: EncodedVideoChunk[] = [];
 
     private constructor(source: File | string, options: VideoSourceOptions = {}) {
         this.source = source;
@@ -441,6 +480,7 @@ export class VideoRenderingSource {
         this.codec = options.codec ?? "";
         this.readySeconds = options.readySeconds ?? 10;
         this.buildReverse = options.reverse ?? true;
+        this.sequential = options.sequential ?? false;
         this.onProgress = options.onProgress;
         this.demuxer = new WebDemuxer({
             wasmFilePath: wasmPath === undefined ? undefined : absoluteWasmPath(wasmPath)
@@ -466,6 +506,22 @@ export class VideoRenderingSource {
         if (num > 0 && den > 0) this.fps = num / den;
         const sourceConfig = await this.demuxer.getDecoderConfig("video") as VideoDecoderConfig;
 
+        // 回放解码一旦出错，getFrame 就永远返回 null，画面会停在最后一帧 ——
+        // 所以这里必须留个声响，不然只能看到"背景视频卡住"这种表象
+        const onReplayError = (e: Error) => {
+            console.error("[video] 回放解码失败，背景视频会停在当前帧:", e);
+            this.error = e;
+        };
+
+        this.onReplayError = onReplayError;
+
+        // 直通模式：不重编码，直接按顺序解源流
+        if (this.sequential) {
+            await this.collect(sourceConfig);
+
+            return;
+        }
+
         // 视频比 readySeconds 长，就只等这么多帧先就绪，剩下的后台接着转
         this.readyFrames = this.duration > this.readySeconds
             ? Math.round(this.readySeconds * this.fps)
@@ -479,15 +535,6 @@ export class VideoRenderingSource {
         });
         await this.readyPromise;
         if (this.error) throw this.error;
-
-        // 回放解码一旦出错，getFrame 就永远返回 null，画面会停在最后一帧 ——
-        // 所以这里必须留个声响，不然只能看到"背景视频卡住"这种表象
-        const onReplayError = (e: Error) => {
-            console.error("[video] 回放解码失败，背景视频会停在当前帧:", e);
-            this.error = e;
-        };
-
-        this.onReplayError = onReplayError;
 
         // 正向流按需创建（见 ensureForward）：硬件 H.264 解码会话有数量上限
         // （常见 3 个），两条视频各建正反向就是 4 个，多出来的会被静默丢弃 ——
@@ -507,13 +554,50 @@ export class VideoRenderingSource {
     private onReplayError: ((e: Error) => void) | null = null;
     private backwardChunks: EncodedVideoChunk[] | null = null;
 
+    /**
+     * 直通模式：只 demux，不解码也不重编码
+     *
+     * 录制 / 离线导出是严格顺序、不回头的渲染，随机访问一次都用不上；那套「重编码成
+     * 10 帧小 GOP + 反向流」纯亏：一个源解码器 + 两个编码器跑满全片，还会和录制
+     * 自己的编码器抢资源（实测把录制拖到十几帧）。
+     */
+    private async collect(sourceConfig: VideoDecoderConfig): Promise<void> {
+        const startedAt = performance.now();
+        const reader = this.demuxer.read("video", 0, this.duration || undefined).getReader();
+
+        try {
+            while (true) {
+                const { done, value } = await reader.read();
+
+                if (done) break;
+                this.sourceChunks.push(value as EncodedVideoChunk);
+            }
+        } finally {
+            try { await reader.cancel(); } catch { }
+        }
+
+        this.replayConfig = sourceConfig;
+        this.total = this.sourceChunks.length;
+        this.transcoding = Promise.resolve();
+        this.markReady();
+        this.onProgress?.(1, "passthrough");
+        console.log(`[video] 直通模式：${this.sourceChunks.length} 块 /`
+            + ` ${((performance.now() - startedAt) / 1000).toFixed(2)}s 收完（没有重编码）`);
+    }
+
     /** 需要正向流时才创建（省一个硬件解码会话） */
     private ensureForward(): DirStream | null {
         // 还没就绪（replayConfig 没有）就没法配置解码器
         if (!this.replayConfig) return null;
         if (!this.forward) {
-            this.forward = new DirStream(false, this.forwardChunks, this.total, this.gop, this.fps,
-                this.window, this.replayConfig, this.replayError);
+            this.forward = new DirStream(
+                false,
+                this.sequential ? this.sourceChunks : this.forwardChunks,
+                this.total, this.gop, this.fps, this.window,
+                this.replayConfig, this.replayError,
+                this.sequential,
+                this.frameTimes
+            );
         }
         if (!this.current) this.current = this.forward;
 
@@ -820,8 +904,10 @@ export class VideoRenderingSource {
      */
     private indexAt(time: number): number {
         const times = this.frameTimes;
+        // 直通模式下时间戳表是回放解码器一边解一边填的
+        const ordered = this.sequential ? (this.forward?.ordered ?? true) : this.framesMonotonic;
 
-        if (!this.framesMonotonic || times.length < 2) {
+        if (!ordered || times.length < 2) {
             return Math.max(0, Math.round(time * this.fps));
         }
 
