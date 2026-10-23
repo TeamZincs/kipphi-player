@@ -4,6 +4,7 @@ import { Muxer as WebmMuxer, ArrayBufferTarget as WebmArrayBufferTarget } from "
 import type { NoteType } from "kipphi";
 
 import type { Player, RendererPreference } from "./player";
+import { VideoFrameSource } from "./video";
 
 /** 容器格式 */
 export type RecordContainer = "mp4" | "webm";
@@ -268,13 +269,33 @@ export async function recordPlayer(player: Player, options: RecordOptions = {}):
     const previousRenderingOffset = renderer.renderingOffset;
     renderer.renderingOffset = 0;
 
-    // 背景视频的转码自己占一个解码器 + 两个编码器，和录制抢的话两边都慢
-    // （实测后台渲染只剩十几帧）。录制把音频、编码器都准备好了，这里等它转完再开跑。
-    const videos = [...renderer.videoMapping.values()];
+    // 录制是**严格顺序、不回头**的渲染，随机访问一次都用不上。加载阶段那套
+    // 「重编码成 10 帧小 GOP + 反向流」在这里纯亏：一个源解码器 + 两个编码器跑满
+    // 全片，还会和录制自己的编码器抢资源。所以录制期间换成就地造的「直通」源：
+    // 只 demux，播放时按顺序解源流。录完再换回去。
+    const originVideos = renderer.videoMapping;
+    const passthrough: VideoFrameSource[] = [];
 
-    if (videos.length > 0) {
-        console.info(`[recorder] 等 ${videos.length} 个背景视频转码完成…`);
-        await Promise.all(videos.map(video => video.ready()));
+    renderer.videoMapping = new Map();
+
+    for (const [name, video] of originVideos) {
+        try {
+            const direct = await VideoFrameSource.from(video.source, {
+                sequential: true,
+                onProgress: percent => console.info(`[recorder] ${name} 收流 ${(percent * 100).toFixed(0)}%`),
+            });
+
+            passthrough.push(direct);
+            renderer.videoMapping.set(name, direct);
+        } catch (error) {
+            // 直通失败就退回原来的源，录制不能因为这个跑不起来
+            console.warn(`[recorder] ${name} 切直通模式失败，继续用原视频源`, error);
+            renderer.videoMapping.set(name, video);
+        }
+    }
+
+    if (passthrough.length > 0) {
+        await Promise.all(passthrough.map(video => video.ready()));
     }
 
     /** 花在等背景视频解码上的时间（排查「录制只有十几帧」用） */
@@ -382,6 +403,11 @@ export async function recordPlayer(player: Player, options: RecordOptions = {}):
         renderer.offlineTime = null;
         // 还原显示延迟补偿
         renderer.renderingOffset = previousRenderingOffset;
+        // 换回原来的视频源，把直通那份拆掉
+        renderer.videoMapping = originVideos;
+        for (const video of passthrough) {
+            try { video.destroy(); } catch { }
+        }
         if (ownsRenderer) {
             renderer.destroy();
         } else if (wasPlaying) {

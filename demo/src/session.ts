@@ -166,16 +166,7 @@ export class DemoSession {
             video: async (name) => {
                 const file = findFile(name);
                 if (!file) throw new Error(`压缩包里没有这个视频: ${name}`);
-                // ?sequential 完全不重编码（顺序渲染用）；?noreverse 只省掉反向流
-                const flags = new URLSearchParams(location.search);
-
-                return await VideoFrameSource.from(
-                    new File([file.buffer as ArrayBuffer], name),
-                    {
-                        sequential: flags.has("sequential"),
-                        reverse: !flags.has("noreverse"),
-                    },
-                );
+                return await VideoFrameSource.from(new File([file.buffer as ArrayBuffer], name));
             },
             shader: async (path) => {
                 const file = findFile(path);
