@@ -95,7 +95,18 @@ export class DemoSession {
     }
 
     /** 解包 + 建播放器 */
-    async load(canvas: HTMLCanvasElement, file: File, log: (s: string) => void): Promise<LoadedPack> {
+    /**
+     * 解包 + 建播放器
+     *
+     * `sequential` 会跳过视频重编码（只 demux）：录制 / 离线导出用得上，
+     * 预览不行 —— 往回拖进度条要靠重编码出来的小 GOP 才跟手。
+     */
+    async load(
+        canvas: HTMLCanvasElement,
+        file: File,
+        log: (s: string) => void,
+        options: { sequential?: boolean } = {},
+    ): Promise<LoadedPack> {
         const unzipped = await unzip(file);
         const findFile = (path: string) => {
             const target = normalizePath(path);
@@ -166,7 +177,10 @@ export class DemoSession {
             video: async (name) => {
                 const file = findFile(name);
                 if (!file) throw new Error(`压缩包里没有这个视频: ${name}`);
-                return await VideoFrameSource.from(new File([file.buffer as ArrayBuffer], name));
+                return await VideoFrameSource.from(
+                    new File([file.buffer as ArrayBuffer], name),
+                    { sequential: options.sequential ?? false },
+                );
             },
             shader: async (path) => {
                 const file = findFile(path);

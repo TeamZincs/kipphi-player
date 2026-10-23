@@ -279,6 +279,13 @@ export async function recordPlayer(player: Player, options: RecordOptions = {}):
     renderer.videoMapping = new Map();
 
     for (const [name, video] of originVideos) {
+        // 本来就是直通源，不用再开一份
+        if (video.sequential) {
+            renderer.videoMapping.set(name, video);
+
+            continue;
+        }
+
         try {
             const direct = await VideoFrameSource.from(video.source, {
                 sequential: true,

@@ -79,7 +79,9 @@
         status = "正在解压…";
         log(`载入 ${file.name}`);
         try {
-            pack = await session.load(canvasEl, file);
+            // 这个页面只用来录制：画布藏在视口外，没人会拖它的进度条，
+            // 所以视频直接走直通（不重编码），省掉一整轮转码和编码器占用
+            pack = await session.load(canvasEl, file, log, { sequential: true });
             hasPack = true;
             status = "选个时长，然后录";
             log(`谱面就绪：${pack.duration.toFixed(1)}s，后端 ${pack.player.rendererName}`);
@@ -125,7 +127,7 @@
             return;
         }
 
-        const range = recordRange(current.duration);
+        const range = full ? [0, null] : recordRange(current.duration);
 
         if (range === null) {
             status = "时间范围不对（要 0 ≤ 起 < 止，且起 < 曲长）";

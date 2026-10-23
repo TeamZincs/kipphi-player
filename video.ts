@@ -466,7 +466,7 @@ export class VideoRenderingSource {
     /** 要不要建反向流（见 {@link VideoSourceOptions.reverse}） */
     private readonly buildReverse: boolean;
     /** 直通模式：不重编码，顺序解源流（见 {@link VideoSourceOptions.sequential}） */
-    private readonly sequential: boolean;
+    readonly sequential: boolean;
     /** 直通模式收下来的源流 chunk */
     private readonly sourceChunks: EncodedVideoChunk[] = [];
 
