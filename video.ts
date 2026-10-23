@@ -160,8 +160,13 @@ class DirStream {
         // 往前喂半个窗口就够了：喂得越深，每次重定位（拖进度条）要解的帧越多，
         // 手感越迟钝；而吞吐量只取决于解码器本身，喂得多并不会更快
         this.lookahead = Math.max(2, Math.floor(window / 2));
-        // 链表只留「前瞻 + 余量」：留着不关的每一帧都占着解码器的输出纹理
-        this.retain = Math.max(4, this.lookahead + 3);
+
+        // 指针链表只留很少几帧：每一帧都占着解码器的一张输出纹理，攥多了解码器
+        // 就没有缓冲可写，会把队列堵死（实测：攥 9 帧时收 23 块只吐出 6 帧，
+        // 之后队列一直卡在 9）。
+        //
+        // 直通模式更是只需要「当前这一帧」，直接压到 3。
+        this.retain = bySequence ? 3 : Math.max(4, this.lookahead + 3);
         this.decoder = new VideoDecoder({
             output: frame => this.receive(frame),
             error: e => this.onError(e instanceof Error ? e : new Error(String(e)))
@@ -280,9 +285,9 @@ class DirStream {
         let guard = 0;
         while (this.fedUpTo <= target && this.fedUpTo < this.chunks.length && guard++ < 128) {
             if (this.decoder.state !== "configured") break;
-            // 队列太深就停手：排队的块解出来都得占一张输出纹理，
-            // 而链表只留 retain 帧，喂太多等于白白占着解码器的池子
-            if (this.decoder.decodeQueueSize >= this.retain) break;
+            // 队列太深就停手。这里按 `window` 而不是 `retain`：排队的只是压缩块，
+            // 不占输出纹理；真正抢池子的是「解出来还没关的帧」，那个由 trim 管
+            if (this.decoder.decodeQueueSize >= this.window) break;
             this.decoder.decode(this.chunks[this.fedUpTo++]!);
         }
     }
@@ -988,6 +993,7 @@ export class VideoRenderingSource {
             dir: this.direction,
             list: stream ? `${stream.head?.orig ?? "-"}..${stream.tail?.orig ?? "-"}` : "-",
             count: stream?.count ?? -1,
+            keep: stream?.retain ?? -1,
             fed: stream?.fedUpTo ?? -1,
             decoder: stream?.decoder.state ?? "-",
             queue: stream?.decoder.decodeQueueSize ?? -1,
@@ -1036,6 +1042,20 @@ export class VideoRenderingSource {
 
         const orig = clamp(wanted, 0, Math.max(0, this.total - 1));
         const deadline = performance.now() + budget;
+
+        // 直通模式：帧时间戳表是**边解边填**的，`indexAt` 在追上来之前只能给出
+        // 「最后一帧」，拿它判断「解好了没」永远为真。所以这里按**时间**算目标帧号，
+        // 一直等到解码追到那儿（最多等 budget）。
+        if (this.sequential) {
+            const target = clamp(Math.round(time * this.fps), 0, Math.max(0, this.total - 1));
+
+            while (this.frameTimes.length <= target && !this.error && performance.now() < deadline) {
+                this.getFrame(time);
+                await stream.waitFrame(8);
+            }
+
+            return;
+        }
 
         for (let i = 0; i < 512; i++) {
             const current = this.current;
