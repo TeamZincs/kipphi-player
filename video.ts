@@ -951,7 +951,22 @@ export class VideoRenderingSource {
         const pos = stream.toPos(orig);
         // 链表覆盖不到：要么往前继续解，要么重新定位
         if (stream.needsReset(pos)) stream.resetTo(pos);
-        stream.ensure(pos);
+
+        /**
+         * 「要哪一帧」和「该往哪喂」是两回事
+         *
+         * 直通模式下 `indexAt` 查的是**已经解出来**的帧时间戳，所以时间跑在前面时
+         * `orig` 永远等于「最后一帧」。拿它当喂帧目标的话，喂帧窗口就钉在原地：
+         * 解码器不再有新输入、`frameTimes` 不再增长、`orig` 也就永远不前进 ——
+         * 死锁。实测卡在第 6 帧、`fed` 停在 12、`queue` 是 0。
+         *
+         * 所以喂帧位置按**时间**算（不受已解出多少限制），取帧还是按 `orig`。
+         */
+        const feed = this.sequential
+            ? clamp(Math.round(time * this.fps), 0, Math.max(0, this.total - 1))
+            : pos;
+
+        stream.ensure(feed);
         // 负时间（以及 time 很小）一律给第一帧
         if (orig <= 0 && stream.first) return stream.first;
         return stream.take(orig);
