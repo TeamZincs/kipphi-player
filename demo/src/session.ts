@@ -68,13 +68,18 @@ export class DemoSession {
 
     /** 等静态资源就绪（字体没加载完就画的话，前几帧的文字会用兜底字体） */
     static async create(): Promise<DemoSession> {
-        setWasmPath("./web-demuxer.wasm");
+        // public/ 里的东西一律按 **base** 取，不能用 `./`：
+        // 多页模式下录制页的地址是 `/kipphi-player/record/`，`./Anchor.png`
+        // 会被解析成 `/kipphi-player/record/Anchor.png` —— 那个路径不存在
+        const asset = (path: string) => `${import.meta.env.BASE_URL}${path}`;
+
+        setWasmPath(asset("web-demuxer.wasm"));
         await Promise.all([
-            Images.loadAndOptimize({ anchor: "./Anchor.png", below: "./Below.png" }),
+            Images.loadAndOptimize({ anchor: asset("Anchor.png"), below: asset("Below.png") }),
             document.fonts.load("64px phigros"),
         ]);
         const respack = await Respack.loadFromPhira(async name => {
-            const url = `./default/${name}`;
+            const url = asset(`default/${name}`);
             const response = await fetch(url);
 
             // 404 的时候 fetch 不报错，拿到的是 HTML 错误页 —— 后面交给
@@ -87,9 +92,9 @@ export class DemoSession {
         });
         const audioProcessor = new AudioProcessor();
         await audioProcessor.init({
-            tap: "./Tap.wav",
-            drag: "./Drag.wav",
-            flick: "./Flick.wav",
+            tap: asset("Tap.wav"),
+            drag: asset("Drag.wav"),
+            flick: asset("Flick.wav"),
         });
         return new DemoSession(respack, audioProcessor);
     }
