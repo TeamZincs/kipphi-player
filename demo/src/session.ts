@@ -95,10 +95,11 @@ export class DemoSession {
     }
 
     /** 解包 + 建播放器 */
-    async load(canvas: HTMLCanvasElement, file: File): Promise<LoadedPack> {
+    async load(canvas: HTMLCanvasElement, file: File, log: (s: string) => void): Promise<LoadedPack> {
         const unzipped = await unzip(file);
         const findFile = (path: string) => {
             const target = normalizePath(path);
+            log(`[demo] 查找文件 ${target}`);
             return unzipped.files.find(item => normalizePath(item.name) === target);
         };
 
@@ -143,7 +144,13 @@ export class DemoSession {
             ? requested as RendererPreference
             : "auto";
 
-        const player = await Player.create(canvas, this.audioProcessor, audio, background, this.respack, { renderer });
+        // ?stats 打开帧率/帧时间覆盖层（离屏录制的播放器不带这个，免得录进画面）
+        const showStats = new URLSearchParams(location.search).has("stats");
+        const player = await Player.create(canvas, this.audioProcessor, audio, background, this.respack, {
+            renderer,
+            showStats,
+        });
+
         console.log(`[demo] 渲染后端: ${player.rendererName}`);
         // 实时预览用的显示延迟补偿；录制时 recorder 会临时归零
         player.renderingOffset = -0.40;

@@ -629,6 +629,12 @@ export interface PlayerOptions {
      * 录制端本来就是这么干的。
      */
     strictVideoSync?: boolean;
+    /**
+     * 画出帧率 / 帧时间 / 时间码的覆盖层，默认 `false`
+     *
+     * 调试用。**它会画进画面里**，录制导出前记得关掉。
+     */
+    showStats?: boolean;
 }
 
 // #default
@@ -825,6 +831,13 @@ export class Player extends EventTarget {
      */
     strictVideoSync = false;
 
+    /**
+     * 画出帧率 / 帧时间 / 时间码的覆盖层，默认关
+     *
+     * 用屏幕坐标画（不跟着谱面变换），画进画面里，录制前记得关。
+     */
+    showStats = false;
+
     heightRatio: number;
 
     
@@ -877,6 +890,7 @@ export class Player extends EventTarget {
         this.gpu = options.gpu ?? null;
         // 严格等视频解码：见 PlayerOptions.strictVideoSync（默认关，开着拖条会迟钝）
         this.strictVideoSync = options.strictVideoSync ?? false;
+        this.showStats = options.showStats ?? false;
         // #enddefault
 
         if (this.gpu) {
@@ -1176,6 +1190,67 @@ export class Player extends EventTarget {
         await found.source.prepare(found.time);
     }
 
+    // #default
+    /**
+     * 帧率 / 帧时间 / 时间码的覆盖层
+     *
+     * 用**屏幕坐标**（identity 变换）画：画布比例变、相机怎么转，这两行字都待在
+     * 左上角和正下方。以前是乘 `baseMatrix` 画的，跟着谱面一起缩放。
+     */
+    private drawStats(frameMs: number): void {
+        const hud = this.overlayContext;
+        const canvas = this.canvas;
+        const now = performance.now();
+
+        this.renderedFrames++;
+        this.collectedFrameTime += frameMs;
+        this.longestFrameTime = Math.max(this.longestFrameTime, frameMs);
+
+        if (now - this.lastRenderingRealTime >= 1000) {
+            const average = this.collectedFrameTime / this.renderedFrames;
+
+            this.lastMeasuredFPSStr = `${(this.renderedFrames * 1000 / (now - this.lastRenderingRealTime)).toFixed(1)} fps`
+                + ` (avg ${average.toFixed(2)}ms, max ${this.longestFrameTime.toFixed(2)}ms)`;
+            this.averageDrawCalls = this.drawCallsInWindow / this.renderedFrames;
+            this.lastRenderingRealTime = now;
+            this.renderedFrames = 0;
+            this.collectedFrameTime = 0;
+            this.longestFrameTime = 0;
+            this.drawCallsInWindow = 0;
+        }
+
+        // 文本每帧重画，但内容一秒才变一次，这样不会每帧都重新光栅化一张文字纹理
+        const drawCallInfo = this.gpu ? `, ${this.averageDrawCalls.toFixed(1)} dc` : "";
+        // 着色器趟数一般不会剧烈变化，这里直接用当帧的值，不做窗口平均
+        const effectInfo = this.gpu ? `, ${this.lastEffectCount} shader` : "";
+
+        hud.save();
+        hud.setTransform(identity);
+        hud.font = "20px phigros";
+        hud.fillStyle = "#ddd";
+
+        // 左上角：帧率 + 帧时间
+        hud.textAlign = "left";
+        hud.textBaseline = "top";
+        hud.fillText(
+            this.lastMeasuredFPSStr
+            + `(${this.renderedTextures} tex${drawCallInfo}${effectInfo}, ${this.rendererName})`,
+            16,
+            16
+        );
+
+        // 正下方：时间码
+        hud.textAlign = "center";
+        hud.textBaseline = "bottom";
+        hud.fillText(
+            `${this.time.toFixed(2)}s ${this.renderingBeats.toFixed(2)}b`,
+            canvas.width / 2,
+            canvas.height - 16
+        );
+        hud.restore();
+    }
+    // #enddefault
+
     /** 画一帧（同步）。背景视频要提前用 {@linkcode prepareVideo} 等解码 */
     render() {
         if (!ENABLE_PLAYER) {
@@ -1397,33 +1472,8 @@ export class Player extends EventTarget {
             chartUI.restore();
         }
         // 真正的覆盖层：只放帧率和时间，z 高于所有谱面图层，永远不受特效影响
-        const hud = this.overlayContext;
-        hud.setTransform(this.baseMatrix);
         // #default
-        hud.font = "20px phigros";
-        hud.fillStyle = "#ddd";
-        const now = performance.now();
-        this.renderedFrames++;
-        this.collectedFrameTime += now - start;
-        this.longestFrameTime = Math.max(this.longestFrameTime, now - start);
-        if (now - this.lastRenderingRealTime >= 1000) {
-            const averageFrameTime = this.collectedFrameTime / this.renderedFrames;
-            this.lastMeasuredFPSStr = (this.renderedFrames * 1000 / (now - this.lastRenderingRealTime)).toFixed(1) + ` (avg ${averageFrameTime.toFixed(2)}ms, max ${this.longestFrameTime.toFixed(2)}ms)`;
-            this.averageDrawCalls = this.drawCallsInWindow / this.renderedFrames;
-            this.lastRenderingRealTime = now;
-            this.renderedFrames = 0;
-            this.collectedFrameTime = 0;
-            this.longestFrameTime = 0;
-            this.drawCallsInWindow = 0;
-        }
-        hud.textAlign = "left";
-        // 文本每帧重画，但内容一秒才变一次，这样不会每帧都重新光栅化一张文字纹理
-        const drawCallInfo = this.gpu ? `, ${this.averageDrawCalls.toFixed(1)} dc` : "";
-        // 着色器趟数一般不会剧烈变化，这里直接用当帧的值，不做窗口平均
-        const effectInfo = this.gpu ? `, ${this.lastEffectCount} shader` : "";
-        hud.fillText(this.lastMeasuredFPSStr + `(${this.renderedTextures} tex${drawCallInfo}${effectInfo}, ${this.rendererName})`, 30, 25);
-        hud.textAlign = "center";
-        hud.fillText(this.time.toFixed(2) + "s " + renderingBeats.toFixed(2) + "b", STANDARD_WIDTH / 2, height)
+        if (this.showStats) this.drawStats(performance.now() - start);
         // #enddefault
 
         // #default
