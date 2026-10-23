@@ -144,7 +144,14 @@
         log(`开始录制（${target}${renderer ? ` / ${renderer}` : ""}）`);
 
         try {
-            const result = await session.record(current, target, range, onRecordProgress, renderer);
+            const result = await session.record(
+                current,
+                canvasEl,
+                target,
+                range,
+                onRecordProgress,
+                renderer,
+            );
 
             const seconds = ((performance.now() - startedAt) / 1000).toFixed(1);
             const megabytes = (result.blob.size / 1024 / 1024).toFixed(1);
