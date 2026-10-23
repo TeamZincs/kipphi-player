@@ -52,6 +52,13 @@ export interface RecordOptions {
     video?: RecordVideoOptions;
     /** 传 `false` 出无声视频 */
     audio?: false | RecordAudioOptions;
+    /**
+     * 每帧是否等背景视频解码跟上，缺省 `true`
+     *
+     * 关了就是「画面先画，视频落后就落后」：录得更快，但背景视频会和谱面错开。
+     * 排查「录制只有十几帧」时可以把它关掉对比一下。
+     */
+    waitVideo?: boolean;
     /** 每过一小段回调一次，`frame` 从 0 开始 */
     onProgress?: (frame: number, total: number) => void;
     signal?: AbortSignal;
@@ -98,8 +105,13 @@ const AUDIO_CANDIDATES: Record<RecordContainer, { codec: string; muxerCodec: str
 const DEFAULT_FPS = 60;
 const DEFAULT_SAMPLE_RATE = 44100;
 const DEFAULT_AUDIO_BITRATE = 128_000;
-/** 同时排队的帧数上限，超过就等编码器消化 */
-const MAX_ENCODE_QUEUE = 8;
+/**
+ * 同时排队的帧数上限，超过就等编码器消化
+ *
+ * 每帧是一整张 1600×900 的图像，排 8 张就是四十多兆还压在编码器里；
+ * 压到 4 张能明显减轻内存/显存压力，编码器也更快周转。
+ */
+const MAX_ENCODE_QUEUE = 4;
 const AUDIO_CHUNK_FRAMES = 1024;
 /**
  * 每隔多久主动把控制权交还浏览器（毫秒）
@@ -288,12 +300,19 @@ export async function recordPlayer(player: Player, options: RecordOptions = {}):
                 throw encodeError;
             }
 
+            // 每帧先让一次事件循环。
+            //
+            // 背景视频解码器的 output 回调**跑在主线程上**：这一圈如果从
+            // `prepareVideo()` 一路占到 `encode()`，解码器就只能一直憋着，
+            // 队列满了、一帧都不吐 —— 表现就是「卡住 → 等两秒 → 又连放几帧」。
+            await tick();
+
             // 严格等背景视频解码跟上这一帧，不然取到的是还停在第一帧
             renderer.offlineTime = range[0] + i / fps;
 
             const beforeVideo = performance.now();
 
-            await renderer.prepareVideo();
+            if (options.waitVideo !== false) await renderer.prepareVideo();
             videoWait += performance.now() - beforeVideo;
             renderer.render();
 

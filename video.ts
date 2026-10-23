@@ -32,8 +32,13 @@ const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, m
 
 /** 转码多久没有任何新帧就算卡住（毫秒） */
 const STALL_MS = 5000;
-/** 回放解码队列满着、多久没有任何新帧就判定解码器死了（毫秒） */
-const DECODER_STALL_MS = 2000;
+/**
+ * 回放解码队列满着、多久没有任何新帧就判定解码器死了（毫秒）
+ *
+ * 别调太小：解码器的 output 回调跑在主线程上，主线程被渲染/编码占住时它一样不吐帧，
+ * 那只叫"没轮到我"，不叫死。太灵敏就会变成「卡两秒 → 重建 → 放几帧 → 又卡两秒」。
+ */
+const DECODER_STALL_MS = 3000;
 
 /**
  * 转码队列：同一时刻只转一条视频
@@ -85,6 +90,8 @@ interface FrameNode {
 class DirStream {
     /** 卡住时会整个换掉，所以不是 readonly */
     decoder: VideoDecoder;
+    /** 被看门狗重建过几次（排查用） */
+    restarts = 0;
     /** 上一次看到进展（喂进去 / 解出来）的时刻，判断解码器是不是卡死了 */
     private lastProgressAt = performance.now();
     private lastFed = -1;
@@ -238,6 +245,7 @@ class DirStream {
         console.warn(`[video] 回放解码器卡住了（队列 ${this.decoder.decodeQueueSize}，`
             + `已 ${((performance.now() - this.lastProgressAt) / 1000).toFixed(1)}s 没有进展），重建一个`);
 
+        this.restarts++;
         try { this.decoder.close(); } catch { }
 
         this.decoder = new VideoDecoder({
@@ -878,6 +886,7 @@ export class VideoRenderingSource {
             fed: stream?.fedUpTo ?? -1,
             decoder: stream?.decoder.state ?? "-",
             queue: stream?.decoder.decodeQueueSize ?? -1,
+            restarts: stream?.restarts ?? -1,
             error: this.error ? String(this.error) : null
         };
     }
