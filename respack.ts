@@ -216,10 +216,12 @@ export class Respack {
         pack.HOLD_BODY_HL = await pack.cropImage(hold_hl, 0, meta.holdAtlasMH[0], hold_hl.width, hold_hl.height - meta.holdAtlasMH[1] - meta.holdAtlasMH[0]);
         pack.HOLD_HEAD_HL = await pack.cropImage(hold_hl, 0, hold_hl.height - meta.holdAtlasMH[1], hold_hl.width, meta.holdAtlasMH[1]);
 
+        // 音效是**可选**的（Phira 资源包规范）：包里没有就让它们留空，
+        // 由 `AudioProcessor` 用自己的兜底音效。缺音效不该让整个资源包加载失败
         const ext = meta.useAudio ?? "ogg";
-        pack.TAP_SE = await readFile(`click.${ext}`);
-        pack.FLICK_SE = await readFile(`flick.${ext}`);
-        pack.DRAG_SE = await readFile(`drag.${ext}`);
+        pack.TAP_SE = await readFile(`click.${ext}`).catch(() => undefined);
+        pack.FLICK_SE = await readFile(`flick.${ext}`).catch(() => undefined);
+        pack.DRAG_SE = await readFile(`drag.${ext}`).catch(() => undefined);
 
         pack.spawnHitDrawer();
         pack.spawnNoteDrawer();

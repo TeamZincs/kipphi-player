@@ -6,9 +6,10 @@ import type { Respack } from "./respack";
 export class AudioProcessor {
     audioContext: AudioContext;
     initialized: boolean;
-    tap: AudioBuffer;
-    drag: AudioBuffer;
-    flick: AudioBuffer;
+    /** 资源包里没有对应音效时是 null（那类音符就没声音） */
+    tap: AudioBuffer | null;
+    drag: AudioBuffer | null;
+    flick: AudioBuffer | null;
     private gainNode: GainNode;
     constructor() {
         this.audioContext = "AudioContext" in window ? new AudioContext() : new globalThis.webkitAudioContext();
@@ -22,10 +23,20 @@ export class AudioProcessor {
         });
         return instance;
     }
-    async init({ tap, drag, flick }: {tap: string | Blob, drag: string | Blob, flick: string | Blob}) {
-        this.tap = await this.loadAudioBuffer(tap);
-        this.drag = await this.loadAudioBuffer(drag);
-        this.flick = await this.loadAudioBuffer(flick);
+    /**
+     * 加载打击音
+     *
+     * 三个都可以不给：资源包里的音效本来就是可选的，缺了就是那类音符没声音，
+     * 不该连带整个播放器起不来。
+     */
+    async init({ tap, drag, flick }: {
+        tap?: string | Blob;
+        drag?: string | Blob;
+        flick?: string | Blob;
+    }) {
+        this.tap = tap ? await this.loadAudioBuffer(tap) : null;
+        this.drag = drag ? await this.loadAudioBuffer(drag) : null;
+        this.flick = flick ? await this.loadAudioBuffer(flick) : null;
         this.gainNode = this.audioContext.createGain();
         this.gainNode.connect(this.audioContext.destination);
         this.volume = 3.5;
@@ -56,7 +67,7 @@ export class AudioProcessor {
     captureNoteSound?: (type: NoteType, beats: number) => void;
     /** 取某个音符类型对应的打击音 */
     getNoteSound(type: NoteType): AudioBuffer | undefined {
-        return [this.tap, this.tap, this.flick, this.drag][type - 1];
+        return [this.tap, this.tap, this.flick, this.drag][type - 1] ?? undefined;
     }
     playNoteSound(type: NoteType, beats: number = 0) {
         if (!this.initialized) {
@@ -66,7 +77,10 @@ export class AudioProcessor {
             this.captureNoteSound(type, beats);
             return;
         }
-        this.play([this.tap, this.tap, this.flick, this.drag][type - 1])
+        // 没有这个音效就不发声音（资源包里的音效是可选的）
+        const sound = [this.tap, this.tap, this.flick, this.drag][type - 1];
+
+        if (sound) this.play(sound);
     }
     /**
      * 音量，默认值是3.5
