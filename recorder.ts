@@ -268,6 +268,9 @@ export async function recordPlayer(player: Player, options: RecordOptions = {}):
     // 否则画面的音符会比打击音（走 time，不含该偏移）早/晚一截
     const previousRenderingOffset = renderer.renderingOffset;
     renderer.renderingOffset = 0;
+    // 调试覆盖层是给眼睛看的，别录进画面（它默认是开的）
+    const previousStats = renderer.showStats;
+    renderer.showStats = 0;
 
     // 录制是**严格顺序、不回头**的渲染，随机访问一次都用不上。加载阶段那套
     // 「重编码成 10 帧小 GOP + 反向流」在这里纯亏：一个源解码器 + 两个编码器跑满
@@ -410,6 +413,8 @@ export async function recordPlayer(player: Player, options: RecordOptions = {}):
         renderer.offlineTime = null;
         // 还原显示延迟补偿
         renderer.renderingOffset = previousRenderingOffset;
+        // 还原调试覆盖层
+        renderer.showStats = previousStats;
         // 换回原来的视频源，把直通那份拆掉
         renderer.videoMapping = originVideos;
         for (const video of passthrough) {
@@ -462,6 +467,8 @@ async function createOffscreenPlayer(
     await offscreen.receive(player.chart!);
 
     // 把和画面相关的可调项抄过去，保证录出来和肉眼看到的一致
+    // （覆盖层不抄：那是给眼睛看的调试信息，不该出现在成片里）
+    offscreen.showStats = 0;
     offscreen.renderingOffset = player.renderingOffset;
     offscreen.baseOffset = player.baseOffset;
     offscreen.showsRenderingBaseline = player.showsRenderingBaseline;

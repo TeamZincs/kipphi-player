@@ -604,6 +604,38 @@ type OperationList = Op.OperationList;
 /** 渲染后端优先级 */
 export type RendererPreference = "auto" | "webgpu" | "webgl1" | "canvas2d";
 
+/**
+ * 调试覆盖层要画哪几块，按位组合，赋给 {@linkcode Player.showStats}
+ *
+ * ```ts
+ * player.showStats = StatsOverlay.Time;                              // 只要正下方的时码
+ * player.showStats = StatsOverlay.Time | StatsOverlay.Details;       // 再加一行纹理/后端
+ * player.showStats = StatsOverlay.None;                              // 关掉
+ * ```
+ */
+export const StatsOverlay = {
+    /** 什么都不画 */
+    None: 0,
+    /** 正下方：时间 + 拍数 */
+    Time: 1,
+    /** 左上第一行：帧率，以及平均 / 最大帧时间 */
+    Timing: 2,
+    /** 左上第二行：纹理数 / 绘制调用 / 着色器趟数 / 后端名 */
+    Details: 4,
+    /** 全开（默认） */
+    All: 7,
+} as const;
+
+/**
+ * 建播放器时的选项
+ *
+ * 这里**只放「副作用大、而且整个生命周期都不会变」的东西**：选哪个渲染后端、
+ * 要不要每帧等视频解码之类。它们会落到 `Player` 上并被标成 `readonly` ——
+ * 想换就得重建播放器。
+ *
+ * 反过来，那种改一下只是「下次渲染时多画一行 / 少画一行」的开关
+ * （比如 {@linkcode Player.showStats}）**不该进来**，直接当普通属性赋值就好。
+ */
 export interface PlayerOptions {
     /**
      * 渲染后端优先级：
@@ -821,22 +853,28 @@ export class Player extends EventTarget {
     /**
      * 播放循环里是否严格等背景视频解码，见 {@linkcode PlayerOptions.strictVideoSync}
      *
-     * 默认关：开着的话拖进度条会明显变迟钝。整个生命周期固定，所以要改就重建播放器。
+     * 默认关：开着的话拖进度条会明显变迟钝。它是从 options 来的，整个生命周期固定，
+     * 所以 `readonly` —— 要改就重建播放器。
      */
     readonly strictVideoSync: boolean = false;
 
     /**
-     * 画出帧率 / 帧时间 / 时间码的覆盖层，默认关
+     * 调试覆盖层画哪几块，默认**全开**（{@linkcode StatsOverlay.All}）
      *
-     * 就一个 if，几乎没有开销，所以**不进 options**，直接赋值就行：
+     * `Player` 是 **editor-first** 的：面向的是谱师，随时看得见帧率、帧时间和时间码
+     * 是日常需要，所以默认就摆出来；用不上的人自己关（`player.showStats = 0`）。
+     *
+     * 它只是渲染时几个按位判断，几乎零开销、随时能改，所以**不进 options**
+     * （见 {@linkcode PlayerOptions} 里那条约定），直接赋值：
      *
      * ```ts
-     * player.showStats = true;
+     * player.showStats = StatsOverlay.Time | StatsOverlay.Timing;
      * ```
      *
-     * 用屏幕坐标画（不跟着谱面变换）。注意它是画进画面里的，录制导出前记得关掉。
+     * 用屏幕坐标画（不跟着谱面变换）。注意它是画进画面里的，正常播放无所谓，
+     * 录制导出想要干净画面就关掉（{@linkcode recordPlayer} 会自己关）。
      */
-    showStats = false;
+    showStats: number = StatsOverlay.All;
 
     heightRatio: number;
 
@@ -1191,61 +1229,76 @@ export class Player extends EventTarget {
 
     // #default
     /**
-     * 帧率 / 帧时间 / 时间码的覆盖层
+     * 调试覆盖层：帧率 / 帧时间 / 时间码，按 {@linkcode Player.showStats} 的位选画
      *
-     * 用**屏幕坐标**（identity 变换）画：画布比例变、相机怎么转，这两行字都待在
+     * 用**屏幕坐标**（identity 变换）画：画布比例变、相机怎么转，这几行字都待在
      * 左上角和正下方。以前是乘 `baseMatrix` 画的，跟着谱面一起缩放。
      */
     private drawStats(frameMs: number): void {
         const hud = this.overlayContext;
         const canvas = this.canvas;
         const now = performance.now();
+        const flags = this.showStats;
+        // 只要时间码的话，帧率统计完全不用攒
+        const measuring = (flags & (StatsOverlay.Timing | StatsOverlay.Details)) !== 0;
 
-        this.renderedFrames++;
-        this.collectedFrameTime += frameMs;
-        this.longestFrameTime = Math.max(this.longestFrameTime, frameMs);
+        if (measuring) {
+            this.renderedFrames++;
+            this.collectedFrameTime += frameMs;
+            this.longestFrameTime = Math.max(this.longestFrameTime, frameMs);
 
-        if (now - this.lastRenderingRealTime >= 1000) {
-            const average = this.collectedFrameTime / this.renderedFrames;
+            if (now - this.lastRenderingRealTime >= 1000) {
+                const average = this.collectedFrameTime / this.renderedFrames;
 
-            this.lastMeasuredFPSStr = `${(this.renderedFrames * 1000 / (now - this.lastRenderingRealTime)).toFixed(1)} fps`
-                + ` (avg ${average.toFixed(2)}ms, max ${this.longestFrameTime.toFixed(2)}ms)`;
-            this.averageDrawCalls = this.drawCallsInWindow / this.renderedFrames;
-            this.lastRenderingRealTime = now;
-            this.renderedFrames = 0;
-            this.collectedFrameTime = 0;
-            this.longestFrameTime = 0;
-            this.drawCallsInWindow = 0;
+                this.lastMeasuredFPSStr = `${(this.renderedFrames * 1000 / (now - this.lastRenderingRealTime)).toFixed(1)} fps`
+                    + ` (avg ${average.toFixed(2)}ms, max ${this.longestFrameTime.toFixed(2)}ms)`;
+                this.averageDrawCalls = this.drawCallsInWindow / this.renderedFrames;
+                this.lastRenderingRealTime = now;
+                this.renderedFrames = 0;
+                this.collectedFrameTime = 0;
+                this.longestFrameTime = 0;
+                this.drawCallsInWindow = 0;
+            }
         }
-
-        // 文本每帧重画，但内容一秒才变一次，这样不会每帧都重新光栅化一张文字纹理
-        const drawCallInfo = this.gpu ? `, ${this.averageDrawCalls.toFixed(1)} dc` : "";
-        // 着色器趟数一般不会剧烈变化，这里直接用当帧的值，不做窗口平均
-        const effectInfo = this.gpu ? `, ${this.lastEffectCount} shader` : "";
 
         hud.save();
         hud.setTransform(identity);
         hud.font = "20px phigros";
         hud.fillStyle = "#ddd";
 
-        // 左上角：帧率 + 帧时间
-        hud.textAlign = "left";
-        hud.textBaseline = "top";
-        hud.fillText(
-            this.lastMeasuredFPSStr
-            + `(${this.renderedTextures} tex${drawCallInfo}${effectInfo}, ${this.rendererName})`,
-            16,
-            16
-        );
+        // 左上第一行：帧率 + 帧时间
+        if (flags & StatsOverlay.Timing) {
+            hud.textAlign = "left";
+            hud.textBaseline = "top";
+            hud.fillText(this.lastMeasuredFPSStr, 16, 16);
+        }
+
+        // 左上第二行：纹理数 / 绘制调用 / 着色器趟数 / 后端
+        if (flags & StatsOverlay.Details) {
+            // 文本每帧重画，但内容一秒才变一次，这样不会每帧都重新光栅化一张文字纹理
+            const drawCallInfo = this.gpu ? `, ${this.averageDrawCalls.toFixed(1)} dc` : "";
+            // 着色器趟数一般不会剧烈变化，这里直接用当帧的值，不做窗口平均
+            const effectInfo = this.gpu ? `, ${this.lastEffectCount} shader` : "";
+
+            hud.textAlign = "left";
+            hud.textBaseline = "top";
+            hud.fillText(
+                `${this.renderedTextures} tex${drawCallInfo}${effectInfo}, ${this.rendererName}`,
+                16,
+                40
+            );
+        }
 
         // 正下方：时间码
-        hud.textAlign = "center";
-        hud.textBaseline = "bottom";
-        hud.fillText(
-            `${this.time.toFixed(2)}s ${this.renderingBeats.toFixed(2)}b`,
-            canvas.width / 2,
-            canvas.height - 16
-        );
+        if (flags & StatsOverlay.Time) {
+            hud.textAlign = "center";
+            hud.textBaseline = "bottom";
+            hud.fillText(
+                `${this.time.toFixed(2)}s ${this.renderingBeats.toFixed(2)}b`,
+                canvas.width / 2,
+                canvas.height - 16
+            );
+        }
         hud.restore();
     }
     // #enddefault
