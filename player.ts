@@ -629,12 +629,6 @@ export interface PlayerOptions {
      * 录制端本来就是这么干的。
      */
     strictVideoSync?: boolean;
-    /**
-     * 画出帧率 / 帧时间 / 时间码的覆盖层，默认 `false`
-     *
-     * 调试用。**它会画进画面里**，录制导出前记得关掉。
-     */
-    showStats?: boolean;
 }
 
 // #default
@@ -750,7 +744,7 @@ export class Player extends EventTarget {
      * GPU 上下文（仅浏览器）。
      * 为 null 时退回 Canvas 2D —— Node 端恒为 null。
      */
-    gpu: GPUContext2D | null = null;
+    readonly gpu: GPUContext2D | null = null;
     /** 浏览器端是否尝试走 GPU 后端，失败会自动退回 Canvas 2D */
     static gpuEnabled = true;
     /** 打开后在控制台输出每帧的 记录/提交 耗时，用来找卡顿 */
@@ -827,14 +821,20 @@ export class Player extends EventTarget {
     /**
      * 播放循环里是否严格等背景视频解码，见 {@linkcode PlayerOptions.strictVideoSync}
      *
-     * 默认关：开着的话拖进度条会明显变迟钝。由 `create()` 的选项决定，之后也能直接改。
+     * 默认关：开着的话拖进度条会明显变迟钝。整个生命周期固定，所以要改就重建播放器。
      */
-    strictVideoSync = false;
+    readonly strictVideoSync: boolean = false;
 
     /**
      * 画出帧率 / 帧时间 / 时间码的覆盖层，默认关
      *
-     * 用屏幕坐标画（不跟着谱面变换），画进画面里，录制前记得关。
+     * 就一个 if，几乎没有开销，所以**不进 options**，直接赋值就行：
+     *
+     * ```ts
+     * player.showStats = true;
+     * ```
+     *
+     * 用屏幕坐标画（不跟着谱面变换）。注意它是画进画面里的，录制导出前记得关掉。
      */
     showStats = false;
 
@@ -890,7 +890,6 @@ export class Player extends EventTarget {
         this.gpu = options.gpu ?? null;
         // 严格等视频解码：见 PlayerOptions.strictVideoSync（默认关，开着拖条会迟钝）
         this.strictVideoSync = options.strictVideoSync ?? false;
-        this.showStats = options.showStats ?? false;
         // #enddefault
 
         if (this.gpu) {

@@ -37,6 +37,7 @@ export interface PreparedPack {
     duration: number;
     /** `?renderer=` 指定的后端，`play()` 没给就用它 */
     renderer: RendererPreference;
+    /** `?stats`：建好播放器后直接赋给 `player.showStats` */
     showStats: boolean;
     /** 谱面要求的所有贴图 / 视频 / 着色器都从这里取 */
     adapter: Parameters<Player["use"]>[0];
@@ -233,8 +234,11 @@ export class DemoSession {
             prepared.audioElement,
             prepared.background,
             this.respack,
-            { renderer: renderer ?? prepared.renderer, showStats: prepared.showStats },
+            { renderer: renderer ?? prepared.renderer },
         );
+
+        // 覆盖层就是个 if，直接赋值就行（不进 options）
+        player.showStats = prepared.showStats;
 
         console.log(`[demo] 渲染后端: ${player.rendererName}`);
         // 实时预览用的显示延迟补偿；录制时 recorder 会临时归零
